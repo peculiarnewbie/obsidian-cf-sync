@@ -7,6 +7,8 @@ interface Env {
   VaultDO: cf.DurableObjectNamespace;
 }
 
+// --- API request/response types ---
+
 interface PrepareRequest {
   opId: string;
   file: string;
@@ -18,6 +20,38 @@ interface PrepareRequest {
 }
 
 interface CommitRequest extends PrepareRequest {}
+
+interface ChangesRequest {
+  since: number;
+}
+
+// Validation helpers for the API boundary
+function validatePrepareRequest(body: unknown): { ok: true; data: PrepareRequest } | { ok: false; error: string; code: string } {
+  if (!body || typeof body !== "object") return { ok: false, error: "Request body must be an object", code: "INVALID_BODY" };
+
+  const { opId, file, chunks, mtime, size, baseFileVersion, deviceId } = body as Record<string, unknown>;
+
+  if (typeof opId !== "string" || opId.length < 1 || opId.length > 64) return { ok: false, error: "opId must be a string between 1 and 64 characters", code: "INVALID_OP_ID" };
+  if (typeof file !== "string" || !/^[a-zA-Z0-9_\-./\s]+$/.test(file)) return { ok: false, error: "file path contains invalid characters", code: "INVALID_FILE_PATH" };
+  if (!Array.isArray(chunks)) return { ok: false, error: "chunks must be an array", code: "INVALID_CHUNKS" };
+  for (const hash of chunks) {
+    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) return { ok: false, error: `each chunk hash must be a 64-character hexadecimal string (got: ${hash})`, code: "INVALID_CHUNK_HASH" };
+  }
+  if (typeof mtime !== "number" || mtime < 0) return { ok: false, error: "mtime must be a non-negative number", code: "INVALID_MTIME" };
+  if (typeof size !== "number" || size < 0) return { ok: false, error: "size must be a non-negative number", code: "INVALID_SIZE" };
+  if (typeof baseFileVersion !== "number" || baseFileVersion < 0) return { ok: false, error: "baseFileVersion must be a non-negative number", code: "INVALID_BASE_VERSION" };
+  if (typeof deviceId !== "string" || deviceId.length < 1) return { ok: false, error: "deviceId is required", code: "INVALID_DEVICE_ID" };
+
+  return {
+    ok: true,
+    data: { opId, file, chunks, mtime, size, baseFileVersion, deviceId },
+  };
+}
+
+// JSON error response helper
+function errorResponse(e: { error: string; code?: string; details?: Record<string, unknown> }, status = 400): Response {
+  return Response.json(e, { status });
+}
 
 interface ChangeRecord {
   global_version: number;
@@ -49,35 +83,43 @@ export default {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    try {
-      if (url.pathname === "/sync/chunk/:hash") {
-        return handleChunkUpload(request, env);
-      }
-      const path = url.pathname;
-      if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
-        return handleChunkUpload(request, env);
-      }
-      if (path === "/sync/prepare" && request.method === "POST") {
-        return handleRpc(env, "prepare", await request.json());
-      }
-      if (path === "/sync/commit" && request.method === "POST") {
-        return handleRpc(env, "commit", await request.json());
-      }
-      if (path === "/sync/changes" && request.method === "GET") {
-        const since = url.searchParams.get("since") ?? "0";
-        return handleRpc(env, "changes", { since: parseInt(since) });
-      }
-      if (path === "/sync/index" && request.method === "GET") {
-        return handleRpc(env, "getFullIndex", {});
-      }
-      if (path.startsWith("/sync/chunk/") && request.method === "GET") {
-        return handleChunkDownload(request, env);
-      }
+      try {
+        if (url.pathname === "/sync/chunk/:hash") {
+          return await handleChunkUpload(request, env);
+        }
+        const path = url.pathname;
+        if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
+          return await handleChunkUpload(request, env);
+        }
+        if (path === "/sync/prepare" && request.method === "POST") {
+          const validated = validatePrepareRequest(await request.json());
+          if (!validated.ok) return errorResponse(validated);
+          return await handleRpc(env, "prepare", validated.data);
+        }
+        if (path === "/sync/commit" && request.method === "POST") {
+          const validated = validatePrepareRequest(await request.json());
+          if (!validated.ok) return errorResponse(validated);
+          return await handleRpc(env, "commit", validated.data as CommitRequest);
+        }
+        if (path === "/sync/changes" && request.method === "GET") {
+          const sinceParam = url.searchParams.get("since");
+          const sinceValue = sinceParam !== null ? parseInt(sinceParam, 10) : 0;
+          if (isNaN(sinceValue) || sinceValue < 0) {
+            return errorResponse({ error: "since must be a non-negative number", code: "INVALID_SINCE" });
+          }
+          return await handleRpc(env, "changes", { since: sinceValue });
+        }
+        if (path === "/sync/index" && request.method === "GET") {
+          return await handleRpc(env, "getFullIndex", undefined);
+        }
+        if (path.startsWith("/sync/chunk/") && request.method === "GET") {
+          return await handleChunkDownload(request, env);
+        }
 
-      return new Response("Not found", { status: 404 });
-    } catch (e) {
-      return new Response(String(e), { status: 500 });
-    }
+        return new Response("Not found", { status: 404 });
+      } catch (e) {
+        return handleRouteError(e);
+      }
   },
 };
 
@@ -95,15 +137,48 @@ function corsHeaders(): Record<string, string> {
   };
 }
 
-async function handleRpc(env: Env, method: string, body: unknown): Promise<Response> {
-  const stub = env.VaultDO.getByName("vault");
-  const result = await (stub as any)[method](body);
-  return Response.json(result);
+function handleRouteError(e: unknown): Response {
+  if (e instanceof Error) {
+    return Response.json({ error: e.message }, { status: 500 });
+  }
+  return Response.json({ error: "Internal server error" }, { status: 500 });
+}
+
+type RpcBody = PrepareRequest | CommitRequest | ChangesRequest | undefined;
+
+type VaultDOStub = {
+  prepare(body: PrepareRequest): Promise<unknown>;
+  commit(body: CommitRequest): Promise<unknown>;
+  changes(body: { since: number }): Promise<unknown>;
+  getFullIndex(): Promise<unknown>;
+  registerChunk(body: { hash: string; size: number }): Promise<{ success: true }>;
+  fetch(request: Request): Promise<Response>;
+};
+
+async function handleRpc(env: Env, method: string, body: RpcBody): Promise<Response> {
+  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
+  if (method === "changes") {
+    const result = await stub.changes({ since: (body as ChangesRequest)?.since ?? 0 });
+    return Response.json(result);
+  }
+  if (method === "getFullIndex") {
+    const result = await stub.getFullIndex();
+    return Response.json(result);
+  }
+  if (method === "prepare") {
+    const result = await stub.prepare(body as PrepareRequest);
+    return Response.json(result);
+  }
+  if (method === "commit") {
+    const result = await stub.commit(body as CommitRequest);
+    return Response.json(result);
+  }
+  throw new Error(`Unknown RPC method: ${method}`);
 }
 
 async function handleWebSocket(request: Request, env: Env): Promise<Response> {
-  const stub = env.VaultDO.getByName("vault");
-  return (stub as any).fetch(request);
+  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
+  return stub.fetch(request);
 }
 
 async function handleChunkUpload(request: Request, env: Env): Promise<Response> {
@@ -123,8 +198,8 @@ async function handleChunkUpload(request: Request, env: Env): Promise<Response> 
 
   await env.CHUNKS_BUCKET.put(`chunks/${hash}`, body);
 
-  const stub = env.VaultDO.getByName("vault");
-  await (stub as any).registerChunk({ hash, size: body.byteLength });
+  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
+  await stub.registerChunk({ hash, size: body.byteLength });
 
   return Response.json({ success: true, hash });
 }
@@ -428,7 +503,9 @@ export class VaultDO extends DurableObject {
       if (msg.type === "ping") {
         ws.send(JSON.stringify({ type: "pong" }));
       }
-    } catch {}
+    } catch (e) {
+      console.error("[VaultDO] WS message parse error:", e);
+    }
   }
 
   async webSocketClose(ws: WebSocket) {}
@@ -447,7 +524,9 @@ export class VaultDO extends DurableObject {
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.send(json);
-      } catch {}
+      } catch (e) {
+        console.error("[VaultDO] broadcast error:", e);
+      }
     }
   }
 }

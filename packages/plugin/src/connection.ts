@@ -46,12 +46,14 @@ export class ConnectionManager {
     };
 
     this.ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data as string) as WSMessage;
-        for (const handler of this.handlers) {
-          handler(msg);
-        }
-      } catch {}
+    try {
+      const msg = JSON.parse(event.data as string) as WSMessage;
+      for (const handler of this.handlers) {
+        handler(msg);
+      }
+    } catch (e) {
+      console.error("[ConnectionManager] WS message parse error:", e);
+    }
     };
 
     this.ws.onclose = () => {
