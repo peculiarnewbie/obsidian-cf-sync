@@ -1,0 +1,35 @@
+{
+  "name": "obsidian-cf-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "vp exec alchemy deploy",
+    "destroy": "vp exec alchemy destroy",
+    "plan": "vp exec alchemy plan",
+    "dev": "vp exec alchemy dev",
+    "dev:worker": "pnpm --filter worker dev",
+    "dev:plugin": "pnpm --filter plugin dev",
+    "build:plugin": "pnpm --filter plugin build",
+    "test": "pnpm --filter worker test",
+    "fmt": "vp fmt",
+    "lint": "vp lint",
+    "check": "vp check",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "alchemy": "2.0.0-beta.44",
+    "effect": "4.0.0-beta.70"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260523.1",
+    "@effect/vitest": "4.0.0-beta.70",
+    "@typescript/native-preview": "7.0.0-dev.20260523.1",
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.1.22",
+    "vite-plus": "^0.1.22",
+    "vitest": "^4.1.7"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "workerd"]
+  }
+}

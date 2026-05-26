@@ -1,0 +1,19 @@
+{
+  "name": "worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "alchemy": "2.0.0-beta.44",
+    "effect": "4.0.0-beta.70"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.9",
+    "@cloudflare/workers-types": "^4.20260523.1",
+    "vitest": "^4.1.7"
+  }
+}

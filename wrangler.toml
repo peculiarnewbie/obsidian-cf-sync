@@ -1,0 +1,17 @@
+name = "obsidian-cf-sync"
+main = "src/worker.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding = "CHUNKS_BUCKET"
+bucket_name = "vault-chunks"
+
+[durable_objects]
+bindings = [
+  { name = "VaultDO", class_name = "VaultDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VaultDO"]
