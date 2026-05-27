@@ -36,6 +36,9 @@ importers:
 
   packages/plugin:
     dependencies:
+      '@obsidian-cf-sync/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       obsidian:
         specifier: latest
         version: 1.12.3(@codemirror/state@6.5.0)(@codemirror/view@6.38.6)
@@ -56,8 +59,17 @@ importers:
         specifier: ^6.0.0
         version: 6.4.2(@types/node@22.19.19)(lightningcss@1.32.0)(yaml@2.9.0)
 
+  packages/protocol:
+    dependencies:
+      effect:
+        specifier: 4.0.0-beta.70
+        version: 4.0.0-beta.70
+
   packages/worker:
     dependencies:
+      '@obsidian-cf-sync/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       alchemy:
         specifier: 2.0.0-beta.44
         version: 2.0.0-beta.44(@types/node@22.19.19)(effect@4.0.0-beta.70)(vite@6.4.2(@types/node@22.19.19)(lightningcss@1.32.0)(yaml@2.9.0))(vitest@4.1.7(@types/node@22.19.19)(vite@6.4.2(@types/node@22.19.19)(lightningcss@1.32.0)(yaml@2.9.0)))(workerd@1.20260521.1)(ws@8.21.0)

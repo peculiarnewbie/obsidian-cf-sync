@@ -139,11 +139,7 @@ export class LocalState {
   }
 
   async getChunkData(hash: string): Promise<ArrayBuffer | undefined> {
-    const entry = await txGet<{ hash: string; data: ArrayBuffer }>(
-      this.db,
-      "chunkCache",
-      hash,
-    );
+    const entry = await txGet<{ hash: string; data: ArrayBuffer }>(this.db, "chunkCache", hash);
     return entry?.data;
   }
 

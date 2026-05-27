@@ -27,7 +27,12 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       },
     });
 
-    if (this.settings.enabled && this.settings.workerUrl && this.settings.apiKey) {
+    if (
+      this.settings.enabled &&
+      this.settings.workerUrl &&
+      this.settings.apiKey &&
+      this.settings.vaultId
+    ) {
       await this.startSync();
     }
   }
@@ -37,11 +42,7 @@ export default class ObsidianCfSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData(),
-    );
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (!this.settings.deviceId) {
       this.settings.deviceId = crypto.randomUUID();
       await this.saveSettings();
@@ -53,8 +54,8 @@ export default class ObsidianCfSyncPlugin extends Plugin {
   }
 
   private async startSync(): Promise<void> {
-    if (!this.settings.workerUrl || !this.settings.apiKey) {
-      new Notice("Configure worker URL and API key in settings first");
+    if (!this.settings.workerUrl || !this.settings.apiKey || !this.settings.vaultId) {
+      new Notice("Configure worker URL, vault ID, and API key in settings first");
       return;
     }
 

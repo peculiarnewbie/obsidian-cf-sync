@@ -1,70 +1,36 @@
 import { DurableObject } from "cloudflare:workers";
 import type * as cf from "@cloudflare/workers-types";
+import {
+  ChunkHash as ChunkHashSchema,
+  CommitRequest as CommitRequestSchema,
+  PrepareRequest as PrepareRequestSchema,
+  VaultId as VaultIdSchema,
+  decodeUnknownSync,
+  type CommitRequest,
+  type PrepareRequest,
+  type VaultId,
+} from "@obsidian-cf-sync/protocol";
 
 interface Env {
   CHUNKS_BUCKET: R2Bucket;
-  SYNC_API_KEY: { get(): string };
+  SYNC_API_KEY: string | { get(): string };
   VaultDO: cf.DurableObjectNamespace;
 }
-
-// --- API request/response types ---
-
-interface PrepareRequest {
-  opId: string;
-  file: string;
-  chunks: string[];
-  mtime: number;
-  size: number;
-  baseFileVersion: number;
-  deviceId: string;
-}
-
-interface CommitRequest extends PrepareRequest {}
 
 interface ChangesRequest {
   since: number;
 }
 
-// Validation helpers for the API boundary
-function validatePrepareRequest(body: unknown): { ok: true; data: PrepareRequest } | { ok: false; error: string; code: string } {
-  if (!body || typeof body !== "object") return { ok: false, error: "Request body must be an object", code: "INVALID_BODY" };
-
-  const { opId, file, chunks, mtime, size, baseFileVersion, deviceId } = body as Record<string, unknown>;
-
-  if (typeof opId !== "string" || opId.length < 1 || opId.length > 64) return { ok: false, error: "opId must be a string between 1 and 64 characters", code: "INVALID_OP_ID" };
-  if (typeof file !== "string" || !/^[a-zA-Z0-9_\-./\s]+$/.test(file)) return { ok: false, error: "file path contains invalid characters", code: "INVALID_FILE_PATH" };
-  if (!Array.isArray(chunks)) return { ok: false, error: "chunks must be an array", code: "INVALID_CHUNKS" };
-  for (const hash of chunks) {
-    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) return { ok: false, error: `each chunk hash must be a 64-character hexadecimal string (got: ${hash})`, code: "INVALID_CHUNK_HASH" };
-  }
-  if (typeof mtime !== "number" || mtime < 0) return { ok: false, error: "mtime must be a non-negative number", code: "INVALID_MTIME" };
-  if (typeof size !== "number" || size < 0) return { ok: false, error: "size must be a non-negative number", code: "INVALID_SIZE" };
-  if (typeof baseFileVersion !== "number" || baseFileVersion < 0) return { ok: false, error: "baseFileVersion must be a non-negative number", code: "INVALID_BASE_VERSION" };
-  if (typeof deviceId !== "string" || deviceId.length < 1) return { ok: false, error: "deviceId is required", code: "INVALID_DEVICE_ID" };
-
-  return {
-    ok: true,
-    data: { opId, file, chunks, mtime, size, baseFileVersion, deviceId },
-  };
+interface RpcContext {
+  vaultId: VaultId;
 }
 
 // JSON error response helper
-function errorResponse(e: { error: string; code?: string; details?: Record<string, unknown> }, status = 400): Response {
+function errorResponse(
+  e: { error: string; code?: string; details?: Record<string, unknown> },
+  status = 400,
+): Response {
   return Response.json(e, { status });
-}
-
-interface ChangeRecord {
-  global_version: number;
-  op_id: string;
-  path: string;
-  old_path: string | null;
-  action: string;
-  file_version: number;
-  device_id: string;
-  chunks_json: string;
-  mtime: number;
-  size: number;
-  timestamp: number;
 }
 
 export default {
@@ -75,58 +41,100 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    if (url.pathname.startsWith("/sync/ws")) {
-      return handleWebSocket(request, env);
-    }
-
     if (!checkAuth(request, env)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
-      try {
-        if (url.pathname === "/sync/chunk/:hash") {
-          return await handleChunkUpload(request, env);
-        }
-        const path = url.pathname;
-        if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
-          return await handleChunkUpload(request, env);
-        }
-        if (path === "/sync/prepare" && request.method === "POST") {
-          const validated = validatePrepareRequest(await request.json());
-          if (!validated.ok) return errorResponse(validated);
-          return await handleRpc(env, "prepare", validated.data);
-        }
-        if (path === "/sync/commit" && request.method === "POST") {
-          const validated = validatePrepareRequest(await request.json());
-          if (!validated.ok) return errorResponse(validated);
-          return await handleRpc(env, "commit", validated.data as CommitRequest);
-        }
-        if (path === "/sync/changes" && request.method === "GET") {
-          const sinceParam = url.searchParams.get("since");
-          const sinceValue = sinceParam !== null ? parseInt(sinceParam, 10) : 0;
-          if (isNaN(sinceValue) || sinceValue < 0) {
-            return errorResponse({ error: "since must be a non-negative number", code: "INVALID_SINCE" });
-          }
-          return await handleRpc(env, "changes", { since: sinceValue });
-        }
-        if (path === "/sync/index" && request.method === "GET") {
-          return await handleRpc(env, "getFullIndex", undefined);
-        }
-        if (path.startsWith("/sync/chunk/") && request.method === "GET") {
-          return await handleChunkDownload(request, env);
-        }
+    const context = getRpcContext(request);
+    if (!context.ok) return errorResponse({ error: context.error, code: "INVALID_VAULT_ID" });
 
-        return new Response("Not found", { status: 404 });
-      } catch (e) {
-        return handleRouteError(e);
+    if (url.pathname.startsWith("/sync/ws")) {
+      return handleWebSocket(request, env, context.data);
+    }
+
+    try {
+      if (url.pathname === "/sync/chunk/:hash") {
+        return await handleChunkUpload(request, env, context.data);
       }
+      const path = url.pathname;
+      if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
+        return await handleChunkUpload(request, env, context.data);
+      }
+      if (path === "/sync/prepare" && request.method === "POST") {
+        const validated = decodeRequest(PrepareRequestSchema, await request.json());
+        if (!validated.ok) return errorResponse(validated);
+        return await handleRpc(env, context.data, "prepare", validated.data);
+      }
+      if (path === "/sync/commit" && request.method === "POST") {
+        const validated = decodeRequest(CommitRequestSchema, await request.json());
+        if (!validated.ok) return errorResponse(validated);
+        return await handleRpc(env, context.data, "commit", validated.data);
+      }
+      if (path === "/sync/changes" && request.method === "GET") {
+        const sinceParam = url.searchParams.get("since");
+        const sinceValue = sinceParam !== null ? parseInt(sinceParam, 10) : 0;
+        if (isNaN(sinceValue) || sinceValue < 0) {
+          return errorResponse({
+            error: "since must be a non-negative number",
+            code: "INVALID_SINCE",
+          });
+        }
+        return await handleRpc(env, context.data, "changes", { since: sinceValue });
+      }
+      if (path === "/sync/index" && request.method === "GET") {
+        return await handleRpc(env, context.data, "getFullIndex", undefined);
+      }
+      if (path.startsWith("/sync/chunk/") && request.method === "GET") {
+        return await handleChunkDownload(request, env);
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (e) {
+      return handleRouteError(e);
+    }
   },
 };
 
 function checkAuth(request: Request, env: Env): boolean {
+  const expected = typeof env.SYNC_API_KEY === "string" ? env.SYNC_API_KEY : env.SYNC_API_KEY.get();
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token");
+  if (token) return token === expected;
+
   const auth = request.headers.get("Authorization");
   if (!auth?.startsWith("Bearer ")) return false;
-  return auth.slice(7) === env.SYNC_API_KEY.get();
+  return auth.slice(7) === expected;
+}
+
+function getRpcContext(
+  request: Request,
+): { ok: true; data: RpcContext } | { ok: false; error: string } {
+  const url = new URL(request.url);
+  const rawVaultId = request.headers.get("X-Vault-Id") ?? url.searchParams.get("vaultId");
+  try {
+    const vaultId = decodeUnknownSync(VaultIdSchema)(rawVaultId);
+    return { ok: true, data: { vaultId } };
+  } catch {
+    return {
+      ok: false,
+      error: "vaultId is required and may only contain letters, numbers, underscores, and dashes",
+    };
+  }
+}
+
+function decodeRequest<T>(
+  schema: { readonly Type: T },
+  value: unknown,
+): { ok: true; data: T } | { ok: false; error: string; code: string } {
+  try {
+    return { ok: true, data: decodeUnknownSync(schema as never)(value) as T };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Invalid request body",
+      code: "INVALID_REQUEST",
+    };
+  }
 }
 
 function corsHeaders(): Record<string, string> {
@@ -155,8 +163,13 @@ type VaultDOStub = {
   fetch(request: Request): Promise<Response>;
 };
 
-async function handleRpc(env: Env, method: string, body: RpcBody): Promise<Response> {
-  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
+async function handleRpc(
+  env: Env,
+  context: RpcContext,
+  method: string,
+  body: RpcBody,
+): Promise<Response> {
+  const stub = env.VaultDO.getByName(context.vaultId) as unknown as VaultDOStub;
   if (method === "changes") {
     const result = await stub.changes({ since: (body as ChangesRequest)?.since ?? 0 });
     return Response.json(result);
@@ -176,15 +189,21 @@ async function handleRpc(env: Env, method: string, body: RpcBody): Promise<Respo
   throw new Error(`Unknown RPC method: ${method}`);
 }
 
-async function handleWebSocket(request: Request, env: Env): Promise<Response> {
-  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
+async function handleWebSocket(request: Request, env: Env, context: RpcContext): Promise<Response> {
+  const stub = env.VaultDO.getByName(context.vaultId) as unknown as VaultDOStub;
   return stub.fetch(request);
 }
 
-async function handleChunkUpload(request: Request, env: Env): Promise<Response> {
+async function handleChunkUpload(
+  request: Request,
+  env: Env,
+  context: RpcContext,
+): Promise<Response> {
   const url = new URL(request.url);
-  const hash = url.pathname.split("/").pop();
-  if (!hash) return new Response("Missing hash", { status: 400 });
+  const rawHash = url.pathname.split("/").pop();
+  if (!rawHash) return new Response("Missing hash", { status: 400 });
+  const hash = decodeRequest(ChunkHashSchema, rawHash);
+  if (!hash.ok) return errorResponse(hash);
 
   const body = await request.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", body);
@@ -192,24 +211,26 @@ async function handleChunkUpload(request: Request, env: Env): Promise<Response> 
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  if (computedHash !== hash) {
+  if (computedHash !== hash.data) {
     return new Response("Hash mismatch", { status: 400 });
   }
 
-  await env.CHUNKS_BUCKET.put(`chunks/${hash}`, body);
+  await env.CHUNKS_BUCKET.put(`chunks/${hash.data}`, body);
 
-  const stub = env.VaultDO.getByName("vault") as unknown as VaultDOStub;
-  await stub.registerChunk({ hash, size: body.byteLength });
+  const stub = env.VaultDO.getByName(context.vaultId) as unknown as VaultDOStub;
+  await stub.registerChunk({ hash: hash.data, size: body.byteLength });
 
-  return Response.json({ success: true, hash });
+  return Response.json({ success: true, hash: hash.data });
 }
 
 async function handleChunkDownload(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const hash = url.pathname.split("/").pop();
-  if (!hash) return new Response("Missing hash", { status: 400 });
+  const rawHash = url.pathname.split("/").pop();
+  if (!rawHash) return new Response("Missing hash", { status: 400 });
+  const hash = decodeRequest(ChunkHashSchema, rawHash);
+  if (!hash.ok) return errorResponse(hash);
 
-  const obj = await env.CHUNKS_BUCKET.get(`chunks/${hash}`);
+  const obj = await env.CHUNKS_BUCKET.get(`chunks/${hash.data}`);
   if (!obj) return new Response("Not found", { status: 404 });
 
   return new Response(obj.body, {
@@ -308,18 +329,25 @@ export class VaultDO extends DurableObject {
   }
 
   async prepare(body: PrepareRequest) {
-    const { opId, file, chunks, baseFileVersion, deviceId } = body;
+    const { opId, file, chunks, baseFileVersion } = body;
 
-    const existingOp = this.queryOne("SELECT global_version FROM changes WHERE op_id = ?", opId);
+    const existingOp = this.queryOne(
+      "SELECT global_version, file_version FROM changes WHERE op_id = ?",
+      opId,
+    );
     if (existingOp) {
       return {
         success: true,
         alreadyCommitted: true,
         globalVersion: Number(existingOp.global_version),
+        fileVersion: Number(existingOp.file_version),
       };
     }
 
-    const current = this.queryOne("SELECT file_version, chunks_json FROM files WHERE path = ?", file);
+    const current = this.queryOne(
+      "SELECT file_version, chunks_json FROM files WHERE path = ?",
+      file,
+    );
     const currentVersion = Number(current?.file_version ?? 0);
 
     if (currentVersion > 0 && baseFileVersion < currentVersion) {
@@ -327,21 +355,22 @@ export class VaultDO extends DurableObject {
         success: false,
         conflict: true,
         currentVersion,
-        currentChunks: current
-          ? JSON.parse(String(current.chunks_json))
-          : [],
+        currentChunks: current ? JSON.parse(String(current.chunks_json)) : [],
       };
     }
 
-    const known = new Set(
-      this.sql
-        .exec(
-          `SELECT hash FROM chunks WHERE hash IN (${chunks.map(() => "?").join(",")})`,
-          ...chunks,
-        )
-        .toArray()
-        .map((row) => String(row.hash)),
-    );
+    const known =
+      chunks.length === 0
+        ? new Set<string>()
+        : new Set(
+            this.sql
+              .exec(
+                `SELECT hash FROM chunks WHERE hash IN (${chunks.map(() => "?").join(",")})`,
+                ...chunks,
+              )
+              .toArray()
+              .map((row) => String(row.hash)),
+          );
     const missing = chunks.filter((hash) => !known.has(hash));
 
     return {
@@ -352,30 +381,35 @@ export class VaultDO extends DurableObject {
   }
 
   async commit(body: CommitRequest) {
-    const { opId, file, chunks, mtime, size, baseFileVersion, deviceId } =
-      body;
+    const { opId, action, file, chunks, mtime, size, baseFileVersion, deviceId } = body;
 
-    const existingOp = this.queryOne("SELECT global_version FROM changes WHERE op_id = ?", opId);
+    const existingOp = this.queryOne(
+      "SELECT global_version, file_version FROM changes WHERE op_id = ?",
+      opId,
+    );
     if (existingOp) {
       return {
         success: true,
         alreadyCommitted: true,
         globalVersion: Number(existingOp.global_version),
+        fileVersion: Number(existingOp.file_version),
       };
     }
 
-    const current = this.queryOne("SELECT file_version FROM files WHERE path = ?", file);
+    const current = this.queryOne(
+      "SELECT file_version, global_version FROM files WHERE path = ?",
+      file,
+    );
     const currentVersion = Number(current?.file_version ?? 0);
 
     if (currentVersion > 0 && baseFileVersion < currentVersion) {
       const conflictId = crypto.randomUUID();
-      const currentChunks = this.queryOne("SELECT chunks_json FROM files WHERE path = ?", file);
       this.sql.exec(
         `INSERT INTO conflicts (conflict_id, path, winning_global_version, losing_device_id, losing_chunks_json, losing_mtime, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         conflictId,
         file,
-        currentVersion,
+        Number(current?.global_version ?? 0),
         deviceId,
         JSON.stringify(chunks),
         mtime,
@@ -388,38 +422,62 @@ export class VaultDO extends DurableObject {
       };
     }
 
-    assertChunksKnown(this.sql, chunks);
+    if (action === "put") {
+      const missingChunk = findMissingChunk(this.sql, chunks);
+      if (missingChunk) {
+        return {
+          success: false,
+          error: `Chunk ${missingChunk} not registered. Upload it first.`,
+          code: "CHUNK_NOT_REGISTERED",
+        };
+      }
+    }
 
     const nextGlobalVersion = this.nextGlobalVersion();
     const nextFileVersion = currentVersion + 1;
     const now = Date.now();
     const chunksJson = JSON.stringify(chunks);
 
-    this.sql.exec(
-      `INSERT OR REPLACE INTO files
-       (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      file,
-      chunksJson,
-      mtime,
-      size,
-      nextFileVersion,
-      nextGlobalVersion,
-      deviceId,
-      now,
-    );
+    if (action === "delete") {
+      this.sql.exec(
+        `INSERT OR REPLACE INTO files
+         (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
+         VALUES (?, '[]', ?, 0, ?, ?, 1, ?, ?)`,
+        file,
+        mtime,
+        nextFileVersion,
+        nextGlobalVersion,
+        deviceId,
+        now,
+      );
+    } else {
+      this.sql.exec(
+        `INSERT OR REPLACE INTO files
+         (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        file,
+        chunksJson,
+        mtime,
+        size,
+        nextFileVersion,
+        nextGlobalVersion,
+        deviceId,
+        now,
+      );
+    }
     this.sql.exec(
       `INSERT INTO changes
        (global_version, op_id, path, action, file_version, device_id, chunks_json, mtime, size, timestamp)
-       VALUES (?, ?, ?, 'update', ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       nextGlobalVersion,
       opId,
       file,
+      action,
       nextFileVersion,
       deviceId,
-      chunksJson,
+      action === "delete" ? "[]" : chunksJson,
       mtime,
-      size,
+      action === "delete" ? 0 : size,
       now,
     );
     this.sql.exec(
@@ -429,6 +487,7 @@ export class VaultDO extends DurableObject {
 
     this.broadcast({
       type: "file_changed",
+      action,
       file,
       fileVersion: nextFileVersion,
       globalVersion: nextGlobalVersion,
@@ -494,10 +553,7 @@ export class VaultDO extends DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    const text =
-      typeof message === "string"
-        ? message
-        : new TextDecoder().decode(message);
+    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
     try {
       const msg = JSON.parse(text);
       if (msg.type === "ping") {
@@ -508,7 +564,7 @@ export class VaultDO extends DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket) {}
+  async webSocketClose(_ws: WebSocket) {}
 
   private getGlobalVersion(): number {
     const row = this.queryOne("SELECT value FROM vault_meta WHERE key = 'globalVersion'");
@@ -531,11 +587,12 @@ export class VaultDO extends DurableObject {
   }
 }
 
-function assertChunksKnown(sql: SqlStorage, chunks: string[]) {
+function findMissingChunk(sql: SqlStorage, chunks: readonly string[]): string | undefined {
   for (const hash of chunks) {
     const rows = sql.exec("SELECT hash FROM chunks WHERE hash = ?", hash).toArray();
     if (rows.length === 0) {
-      throw new Error(`Chunk ${hash} not registered. Upload it first.`);
+      return hash;
     }
   }
+  return undefined;
 }

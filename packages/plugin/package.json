@@ -7,6 +7,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@obsidian-cf-sync/protocol": "workspace:*",
     "obsidian": "latest"
   },
   "devDependencies": {

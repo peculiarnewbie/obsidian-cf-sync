@@ -149,29 +149,29 @@ No journal files. No metadata in R2. Just raw content blobs.
 // Local file index (mirrors the DO files table)
 interface LocalFileIndex {
   [path: string]: {
-    chunks: string[]      // chunk hashes
-    mtime: number
-    fileVersion: number
-    globalVersion: number
-  }
+    chunks: string[]; // chunk hashes
+    mtime: number;
+    fileVersion: number;
+    globalVersion: number;
+  };
 }
 
 // Sync state
 interface SyncState {
-  globalVersion: number         // last version seen from DO
-  lastFullSync: number          // timestamp
-  pendingOps: SyncOperation[]   // idempotent local edits not yet committed
+  globalVersion: number; // last version seen from DO
+  lastFullSync: number; // timestamp
+  pendingOps: SyncOperation[]; // idempotent local edits not yet committed
 }
 
 interface SyncOperation {
-  opId: string
-  action: 'update' | 'delete' | 'rename'
-  path: string
-  oldPath?: string
-  baseFileVersion: number
-  chunks: string[]
-  mtime: number
-  size: number
+  opId: string;
+  action: "update" | "delete" | "rename";
+  path: string;
+  oldPath?: string;
+  baseFileVersion: number;
+  chunks: string[];
+  mtime: number;
+  size: number;
 }
 ```
 
@@ -315,39 +315,39 @@ PUT    /api/vault/file/:path  → Write a file through the same prepare/upload/c
 ## Durable Object Implementation
 
 ```typescript
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject } from "cloudflare:workers";
 
 export class VaultDO extends DurableObject {
-  sql: SqlStorage
+  sql: SqlStorage;
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env)
-    this.sql = ctx.storage.sql
-    ctx.blockConcurrencyWhile(() => this.migrate())
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    ctx.blockConcurrencyWhile(() => this.migrate());
   }
 
   async fetch(request: Request): Promise<Response> {
     // WebSocket upgrade for real-time sync
-    if (request.headers.get('Upgrade') === 'websocket') {
-      const pair = new WebSocketPair()
-      this.ctx.acceptWebSocket(pair[1])
-      return new Response(null, { status: 101, webSocket: pair[0] })
+    if (request.headers.get("Upgrade") === "websocket") {
+      const pair = new WebSocketPair();
+      this.ctx.acceptWebSocket(pair[1]);
+      return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
     // HTTP RPC calls
-    const url = new URL(request.url)
+    const url = new URL(request.url);
 
-    if (url.pathname === '/prepare') {
-      return this.handlePrepare(await request.json())
+    if (url.pathname === "/prepare") {
+      return this.handlePrepare(await request.json());
     }
-    if (url.pathname === '/commit') {
-      return this.handleCommit(await request.json())
+    if (url.pathname === "/commit") {
+      return this.handleCommit(await request.json());
     }
-    if (url.pathname === '/changes') {
-      return this.handleChanges(url.searchParams.get('since'))
+    if (url.pathname === "/changes") {
+      return this.handleChanges(url.searchParams.get("since"));
     }
 
-    return new Response('Not found', { status: 404 })
+    return new Response("Not found", { status: 404 });
   }
 
   migrate() {
@@ -358,23 +358,23 @@ export class VaultDO extends DurableObject {
       CREATE TABLE IF NOT EXISTS chunks (...);
       CREATE TABLE IF NOT EXISTS conflicts (...);
       CREATE TABLE IF NOT EXISTS vault_meta (...);
-    `)
+    `);
   }
 
   async handlePrepare(body: PrepareRequest) {
-    const { opId, file, chunks, baseFileVersion } = body
+    const { opId, file, chunks, baseFileVersion } = body;
 
     const existingOp = this.sql
-      .exec('SELECT global_version FROM changes WHERE op_id = ?', opId)
-      .one()
+      .exec("SELECT global_version FROM changes WHERE op_id = ?", opId)
+      .one();
     if (existingOp) {
-      return Response.json({ success: true, alreadyCommitted: true, ...existingOp })
+      return Response.json({ success: true, alreadyCommitted: true, ...existingOp });
     }
 
     const current = this.sql
-      .exec('SELECT file_version, chunks_json FROM files WHERE path = ?', file)
-      .one()
-    const currentVersion = Number(current?.file_version ?? 0)
+      .exec("SELECT file_version, chunks_json FROM files WHERE path = ?", file)
+      .one();
+    const currentVersion = Number(current?.file_version ?? 0);
 
     if (currentVersion > 0 && baseFileVersion < currentVersion) {
       return Response.json({
@@ -382,90 +382,114 @@ export class VaultDO extends DurableObject {
         conflict: true,
         currentVersion,
         currentChunks: JSON.parse(String(current.chunks_json)),
-      })
+      });
     }
 
     const known = new Set(
       this.sql
-        .exec(`SELECT hash FROM chunks WHERE hash IN (${chunks.map(() => '?').join(',')})`, ...chunks)
+        .exec(
+          `SELECT hash FROM chunks WHERE hash IN (${chunks.map(() => "?").join(",")})`,
+          ...chunks,
+        )
         .toArray()
         .map((row) => String(row.hash)),
-    )
-    const missing = chunks.filter((hash) => !known.has(hash))
+    );
+    const missing = chunks.filter((hash) => !known.has(hash));
 
     return Response.json({
       success: true,
       missing,
       currentVersion,
-    })
+    });
   }
 
   async handleCommit(body: CommitRequest) {
-    const { opId, file, chunks, mtime, size, baseFileVersion, deviceId } = body
+    const { opId, file, chunks, mtime, size, baseFileVersion, deviceId } = body;
 
     const existingOp = this.sql
-      .exec('SELECT global_version FROM changes WHERE op_id = ?', opId)
-      .one()
+      .exec("SELECT global_version FROM changes WHERE op_id = ?", opId)
+      .one();
     if (existingOp) {
-      return Response.json({ success: true, alreadyCommitted: true, ...existingOp })
+      return Response.json({ success: true, alreadyCommitted: true, ...existingOp });
     }
 
-    const current = this.sql
-      .exec('SELECT file_version FROM files WHERE path = ?', file)
-      .one()
-    const currentVersion = Number(current?.file_version ?? 0)
+    const current = this.sql.exec("SELECT file_version FROM files WHERE path = ?", file).one();
+    const currentVersion = Number(current?.file_version ?? 0);
 
     if (currentVersion > 0 && baseFileVersion < currentVersion) {
       return Response.json({
         success: false,
         conflict: true,
         currentVersion,
-      })
+      });
     }
 
     // Commit must only reference chunks already verified into R2/chunks.
-    this.assertChunksKnown(chunks)
+    this.assertChunksKnown(chunks);
 
-    const nextGlobalVersion = this.nextGlobalVersion()
-    const nextFileVersion = currentVersion + 1
-    const now = Date.now()
-    const chunksJson = JSON.stringify(chunks)
+    const nextGlobalVersion = this.nextGlobalVersion();
+    const nextFileVersion = currentVersion + 1;
+    const now = Date.now();
+    const chunksJson = JSON.stringify(chunks);
 
     this.sql.exec(
       `INSERT OR REPLACE INTO files
        (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      file, chunksJson, mtime, size, nextFileVersion, nextGlobalVersion, deviceId, now,
-    )
+      file,
+      chunksJson,
+      mtime,
+      size,
+      nextFileVersion,
+      nextGlobalVersion,
+      deviceId,
+      now,
+    );
     this.sql.exec(
       `INSERT INTO changes
        (global_version, op_id, path, action, file_version, device_id, chunks_json, mtime, size, timestamp)
        VALUES (?, ?, ?, 'update', ?, ?, ?, ?, ?, ?)`,
-      nextGlobalVersion, opId, file, nextFileVersion, deviceId, chunksJson, mtime, size, now,
-    )
+      nextGlobalVersion,
+      opId,
+      file,
+      nextFileVersion,
+      deviceId,
+      chunksJson,
+      mtime,
+      size,
+      now,
+    );
     this.sql.exec(
       `INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('globalVersion', ?)`,
       String(nextGlobalVersion),
-    )
+    );
 
-    this.broadcast({ type: 'file_changed', file, fileVersion: nextFileVersion, globalVersion: nextGlobalVersion })
+    this.broadcast({
+      type: "file_changed",
+      file,
+      fileVersion: nextFileVersion,
+      globalVersion: nextGlobalVersion,
+    });
 
     return Response.json({
       success: true,
       fileVersion: nextFileVersion,
       globalVersion: nextGlobalVersion,
-    })
+    });
   }
 
   async handleChanges(since: string | null) {
-    const sinceVersion = parseInt(since ?? '0')
+    const sinceVersion = parseInt(since ?? "0");
 
-    const globalVersion = this.getGlobalVersion()
+    const globalVersion = this.getGlobalVersion();
     const changes = this.sql
-      .exec('SELECT * FROM changes WHERE global_version > ? ORDER BY global_version ASC', sinceVersion)
-      .toArray()
+      .exec(
+        "SELECT * FROM changes WHERE global_version > ? ORDER BY global_version ASC",
+        sinceVersion,
+      )
+      .toArray();
 
-    return Response.json({ changes, globalVersion })
+    return Response.json({ changes, globalVersion });
   }
 
   // WebSocket handlers
@@ -557,6 +581,7 @@ Plugin decrypts AFTER download:
 Encrypting the whole file before chunking would make most edits rewrite all ciphertext chunks, defeating deduplication. V1 may skip E2EE entirely until the sync protocol is proven.
 
 The DO and Worker never see plaintext. The DO only sees:
+
 - Encrypted chunk hashes / object IDs
 - File paths (can be obfuscated)
 - Timestamps and version numbers
@@ -661,16 +686,16 @@ It does NOT know file contents.
 
 ### Free Tier (single user, single vault)
 
-| Resource | Free tier | Estimated usage |
-|----------|-----------|-----------------|
-| Worker requests | 100K/day | ~2-5K/day depending on chunk uploads/downloads |
-| DO requests | 100K/day | ~1K/day metadata calls + WebSocket activity |
-| DO duration | 13,000 GB-s/day | With hibernation: ~0 |
-| DO SQLite reads | 5M/day | ~10K/day |
-| DO SQLite writes | 100K/day | ~1K/day |
-| R2 storage | 10GB | ~100MB (typical vault) |
-| R2 Class A (writes) | 1M/month | ~1K/month |
-| R2 Class B (reads) | 10M/month | ~5K/month |
+| Resource            | Free tier       | Estimated usage                                |
+| ------------------- | --------------- | ---------------------------------------------- |
+| Worker requests     | 100K/day        | ~2-5K/day depending on chunk uploads/downloads |
+| DO requests         | 100K/day        | ~1K/day metadata calls + WebSocket activity    |
+| DO duration         | 13,000 GB-s/day | With hibernation: ~0                           |
+| DO SQLite reads     | 5M/day          | ~10K/day                                       |
+| DO SQLite writes    | 100K/day        | ~1K/day                                        |
+| R2 storage          | 10GB            | ~100MB (typical vault)                         |
+| R2 Class A (writes) | 1M/month        | ~1K/month                                      |
+| R2 Class B (reads)  | 10M/month       | ~5K/month                                      |
 
 **Verdict**: Comfortably within free tier for a personal vault.
 
@@ -688,16 +713,16 @@ For 100 users with active vaults: ~$5-15/month total.
 
 ## Key Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| DO vs D1 for metadata | DO SQLite | Per-vault serialized writes, conflict checks, WebSocket fan-out. D1 can become a future read replica. |
-| Chunking | Content-addressable (SHA-256) | Deduplication, integrity verification, immutable blobs. Use larger chunks to avoid excessive R2 objects. |
-| Upload path | Worker-verified in v1 | Simpler integrity and abuse control. Presigned URLs can come later once commit validation is solid. |
-| Conflict strategy | Last-write-wins + conflict copies | Simple for v1. Content-aware merge later. |
-| Encryption | AES-256-GCM client-side | DO never sees plaintext. Trustless. |
-| TinyBase | Not core | Good reference for DO WebSocket hibernation, but file sync needs custom domain protocol. |
-| DO hibernation | Yes, if WebSocket code remains hibernation-compatible | Cost savings. Correctness cannot depend on in-memory state surviving. |
-| Local persistence | IndexedDB/IDB or Obsidian plugin storage | Offline support. Survives Obsidian restart and mobile app suspension. |
+| Decision              | Choice                                                | Rationale                                                                                                |
+| --------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| DO vs D1 for metadata | DO SQLite                                             | Per-vault serialized writes, conflict checks, WebSocket fan-out. D1 can become a future read replica.    |
+| Chunking              | Content-addressable (SHA-256)                         | Deduplication, integrity verification, immutable blobs. Use larger chunks to avoid excessive R2 objects. |
+| Upload path           | Worker-verified in v1                                 | Simpler integrity and abuse control. Presigned URLs can come later once commit validation is solid.      |
+| Conflict strategy     | Last-write-wins + conflict copies                     | Simple for v1. Content-aware merge later.                                                                |
+| Encryption            | AES-256-GCM client-side                               | DO never sees plaintext. Trustless.                                                                      |
+| TinyBase              | Not core                                              | Good reference for DO WebSocket hibernation, but file sync needs custom domain protocol.                 |
+| DO hibernation        | Yes, if WebSocket code remains hibernation-compatible | Cost savings. Correctness cannot depend on in-memory state surviving.                                    |
+| Local persistence     | IndexedDB/IDB or Obsidian plugin storage              | Offline support. Survives Obsidian restart and mobile app suspension.                                    |
 
 ---
 
@@ -708,4 +733,5 @@ For 100 users with active vaults: ~$5-15/month total.
 - [Cloudflare DO lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)
 - [Obsidian mobile development](https://docs.obsidian.md/Plugins/Getting+started/Mobile+development)
 - [Obsidian Plugin API](https://docs.obsidian.md/Reference/TypeScript/App)
-- [obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) — mobile-compatible sync/plugin reference and chunking ideas (MIT license)
+- `.references/tinybase` — local reference for hibernating Durable Object WebSocket patterns
+- `.references/obsidian-livesync` — local reference for mobile-compatible sync/plugin behavior and chunking ideas (MIT license)

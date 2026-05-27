@@ -4,6 +4,7 @@ import type ObsidianCfSyncPlugin from "./main";
 export interface PluginSettings {
   workerUrl: string;
   apiKey: string;
+  vaultId: string;
   deviceId: string;
   syncInterval: number;
   enabled: boolean;
@@ -12,6 +13,7 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
   workerUrl: "",
   apiKey: "",
+  vaultId: "default",
   deviceId: "",
   syncInterval: 2000,
   enabled: true,
@@ -41,7 +43,20 @@ export class SyncSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.workerUrl = value;
             await this.plugin.saveSettings();
-          })
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Vault ID")
+      .setDesc("Stable vault identifier used to isolate this vault on the Worker")
+      .addText((text) =>
+        text
+          .setPlaceholder("personal-vault")
+          .setValue(this.plugin.settings.vaultId)
+          .onChange(async (value) => {
+            this.plugin.settings.vaultId = value;
+            await this.plugin.saveSettings();
+          }),
       );
 
     new Setting(containerEl)
@@ -65,7 +80,7 @@ export class SyncSettingTab extends PluginSettingTab {
         toggle.setValue(this.plugin.settings.enabled).onChange(async (value) => {
           this.plugin.settings.enabled = value;
           await this.plugin.saveSettings();
-        })
+        }),
       );
 
     new Setting(containerEl)
@@ -81,7 +96,7 @@ export class SyncSettingTab extends PluginSettingTab {
               this.plugin.settings.syncInterval = num;
               await this.plugin.saveSettings();
             }
-          })
+          }),
       );
   }
 }
