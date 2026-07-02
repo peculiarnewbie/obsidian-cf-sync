@@ -6,6 +6,7 @@ export interface PluginSettings {
   apiKey: string;
   vaultId: string;
   deviceId: string;
+  deviceToken: string;
   syncInterval: number;
   enabled: boolean;
 }
@@ -15,6 +16,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   apiKey: "",
   vaultId: "default",
   deviceId: "",
+  deviceToken: "",
   syncInterval: 2000,
   enabled: true,
 };
@@ -61,7 +63,9 @@ export class SyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("API Key")
-      .setDesc("Shared secret for authentication")
+      .setDesc(
+        "Bootstrap key used to enroll this device. Sync uses the device token after pairing.",
+      )
       .addText((text) => {
         text.inputEl.type = "password";
         text
@@ -72,6 +76,23 @@ export class SyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Device token")
+      .setDesc(
+        this.plugin.settings.deviceToken
+          ? "This device is paired and has a sync token."
+          : "Pair this device to receive a sync token.",
+      )
+      .addButton((button) =>
+        button
+          .setButtonText(this.plugin.settings.deviceToken ? "Re-pair device" : "Pair device")
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.enrollDevice();
+            this.display();
+          }),
+      );
 
     new Setting(containerEl)
       .setName("Sync enabled")

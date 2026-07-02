@@ -55,6 +55,12 @@ export const SyncRequestHeaders = Schema.Struct({
 });
 export type SyncRequestHeaders = Schema.Schema.Type<typeof SyncRequestHeaders>;
 
+export const DeviceAuthHeaders = Schema.Struct({
+  "x-vault-id": VaultId,
+  "x-device-id": DeviceId,
+});
+export type DeviceAuthHeaders = Schema.Schema.Type<typeof DeviceAuthHeaders>;
+
 export const ChangesQuery = Schema.Struct({
   since: Schema.NumberFromString.check(Schema.isGreaterThanOrEqualTo(0)),
 });
@@ -189,5 +195,30 @@ export const ChunkUploadResponse = Schema.Struct({
   hash: ChunkHash,
 });
 export type ChunkUploadResponse = Schema.Schema.Type<typeof ChunkUploadResponse>;
+
+export const DeviceEnrollmentRequest = Schema.Struct({
+  deviceId: DeviceId,
+  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+  platform: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+});
+export type DeviceEnrollmentRequest = Schema.Schema.Type<typeof DeviceEnrollmentRequest>;
+
+export const DeviceEnrollmentResponse = Schema.Struct({
+  success: Schema.Literal(true),
+  deviceId: DeviceId,
+  deviceToken: Schema.String.check(Schema.isMinLength(32)),
+});
+export type DeviceEnrollmentResponse = Schema.Schema.Type<typeof DeviceEnrollmentResponse>;
+
+export const RevokeDeviceRequest = Schema.Struct({
+  deviceId: DeviceId,
+});
+export type RevokeDeviceRequest = Schema.Schema.Type<typeof RevokeDeviceRequest>;
+
+export const RevokeDeviceResponse = Schema.Struct({
+  success: Schema.Literal(true),
+  deviceId: DeviceId,
+});
+export type RevokeDeviceResponse = Schema.Schema.Type<typeof RevokeDeviceResponse>;
 
 export const decodeUnknownSync = Schema.decodeUnknownSync;

@@ -6,37 +6,52 @@ import {
   ChunkUploadResponse,
   CommitRequest,
   CommitResponse,
+  DeviceAuthHeaders,
+  DeviceEnrollmentRequest,
+  DeviceEnrollmentResponse,
   FullIndexResponse,
   PrepareRequest,
   PrepareResponse,
+  RevokeDeviceRequest,
+  RevokeDeviceResponse,
   SyncRequestHeaders,
 } from "./index";
 
 export const SyncApi = HttpApi.make("ObsidianCfSyncApi").add(
   HttpApiGroup.make("sync", { topLevel: true }).add(
     HttpApiEndpoint.post("prepare", "/sync/prepare", {
-      headers: SyncRequestHeaders,
+      headers: DeviceAuthHeaders,
       payload: PrepareRequest,
       success: PrepareResponse,
     }),
     HttpApiEndpoint.post("commit", "/sync/commit", {
-      headers: SyncRequestHeaders,
+      headers: DeviceAuthHeaders,
       payload: CommitRequest,
       success: CommitResponse,
     }),
     HttpApiEndpoint.get("changes", "/sync/changes", {
-      headers: SyncRequestHeaders,
+      headers: DeviceAuthHeaders,
       query: ChangesQuery,
       success: ChangesResponse,
     }),
     HttpApiEndpoint.get("index", "/sync/index", {
-      headers: SyncRequestHeaders,
+      headers: DeviceAuthHeaders,
       success: FullIndexResponse,
     }),
     HttpApiEndpoint.put("uploadChunk", "/sync/chunk/:hash", {
-      headers: SyncRequestHeaders,
+      headers: DeviceAuthHeaders,
       params: ChunkParams,
       success: ChunkUploadResponse,
+    }),
+    HttpApiEndpoint.post("enrollDevice", "/devices/enroll", {
+      headers: SyncRequestHeaders,
+      payload: DeviceEnrollmentRequest,
+      success: DeviceEnrollmentResponse,
+    }),
+    HttpApiEndpoint.post("revokeDevice", "/devices/revoke", {
+      headers: SyncRequestHeaders,
+      payload: RevokeDeviceRequest,
+      success: RevokeDeviceResponse,
     }),
   ),
 );

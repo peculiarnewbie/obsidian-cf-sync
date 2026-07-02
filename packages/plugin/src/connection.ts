@@ -9,7 +9,6 @@ export type ConnectHandler = () => void;
 export class ConnectionManager {
   private ws: WebSocket | null = null;
   private url: string;
-  private apiKey: string;
   private handlers: MessageHandler[] = [];
   private connectHandlers: ConnectHandler[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -18,10 +17,9 @@ export class ConnectionManager {
   private _connected = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(workerUrl: string, apiKey: string, vaultId: string) {
-    const params = new URLSearchParams({ token: apiKey, vaultId });
+  constructor(workerUrl: string, deviceToken: string, vaultId: string, deviceId: string) {
+    const params = new URLSearchParams({ token: deviceToken, vaultId, deviceId });
     this.url = `${workerUrl.replace(/^http/, "ws")}/sync/ws?${params.toString()}`;
-    this.apiKey = apiKey;
   }
 
   get connected(): boolean {

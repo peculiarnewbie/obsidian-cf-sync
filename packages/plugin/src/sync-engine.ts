@@ -26,7 +26,12 @@ export class SyncEngine {
     this.app = app;
     this.settings = settings;
     this.localState = new LocalState();
-    this.connection = new ConnectionManager(settings.workerUrl, settings.apiKey, settings.vaultId);
+    this.connection = new ConnectionManager(
+      settings.workerUrl,
+      settings.deviceToken,
+      settings.vaultId,
+      settings.deviceId,
+    );
   }
 
   async start(): Promise<void> {
@@ -433,8 +438,9 @@ export class SyncEngine {
     const resp = await fetch(url, {
       method: "PUT",
       headers: {
-        Authorization: `Bearer ${this.settings.apiKey}`,
+        Authorization: `Bearer ${this.settings.deviceToken}`,
         "X-Vault-Id": this.settings.vaultId,
+        "X-Device-Id": this.settings.deviceId,
         "Content-Type": "application/octet-stream",
       },
       body: data,
@@ -448,8 +454,9 @@ export class SyncEngine {
     const url = `${this.settings.workerUrl}/sync/chunk/${hash}`;
     const resp = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${this.settings.apiKey}`,
+        Authorization: `Bearer ${this.settings.deviceToken}`,
         "X-Vault-Id": this.settings.vaultId,
+        "X-Device-Id": this.settings.deviceId,
       },
     });
     if (!resp.ok) throw new Error(`Download failed: ${resp.status}`);
@@ -466,8 +473,9 @@ export class SyncEngine {
     const opts: RequestInit = {
       method,
       headers: {
-        Authorization: `Bearer ${this.settings.apiKey}`,
+        Authorization: `Bearer ${this.settings.deviceToken}`,
         "X-Vault-Id": this.settings.vaultId,
+        "X-Device-Id": this.settings.deviceId,
         "Content-Type": "application/json",
       },
     };

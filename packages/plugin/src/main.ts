@@ -1,4 +1,8 @@
 import { Notice, Plugin } from "obsidian";
+import {
+  DeviceEnrollmentResponse as DeviceEnrollmentResponseSchema,
+  decodeUnknownSync,
+} from "@obsidian-cf-sync/protocol";
 import { DEFAULT_SETTINGS, PluginSettings, SyncSettingTab } from "./settings";
 import { SyncEngine } from "./sync-engine";
 
@@ -30,8 +34,8 @@ export default class ObsidianCfSyncPlugin extends Plugin {
     if (
       this.settings.enabled &&
       this.settings.workerUrl &&
-      this.settings.apiKey &&
-      this.settings.vaultId
+      this.settings.vaultId &&
+      this.settings.deviceToken
     ) {
       await this.startSync();
     }
@@ -53,9 +57,41 @@ export default class ObsidianCfSyncPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  private async startSync(): Promise<void> {
+  async enrollDevice(): Promise<void> {
     if (!this.settings.workerUrl || !this.settings.apiKey || !this.settings.vaultId) {
-      new Notice("Configure worker URL, vault ID, and API key in settings first");
+      new Notice("Configure worker URL, vault ID, and API key before pairing");
+      return;
+    }
+
+    const resp = await fetch(`${this.settings.workerUrl}/devices/enroll`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.settings.apiKey}`,
+        "X-Vault-Id": this.settings.vaultId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        deviceId: this.settings.deviceId,
+        name: this.app.vault.getName(),
+        platform: navigator.userAgent.includes("Mobile") ? "mobile" : "desktop",
+      }),
+    });
+
+    if (!resp.ok) {
+      new Notice(`Device pairing failed: ${resp.status}`);
+      return;
+    }
+
+    const enrollment = decodeUnknownSync(DeviceEnrollmentResponseSchema)(await resp.json());
+    this.settings.deviceId = enrollment.deviceId;
+    this.settings.deviceToken = enrollment.deviceToken;
+    await this.saveSettings();
+    new Notice("Device paired");
+  }
+
+  private async startSync(): Promise<void> {
+    if (!this.settings.workerUrl || !this.settings.vaultId || !this.settings.deviceToken) {
+      new Notice("Configure worker URL and vault ID, then pair this device first");
       return;
     }
 

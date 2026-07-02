@@ -611,44 +611,44 @@ It does NOT know file contents.
 
 **Goal**: One file syncs between two Obsidian instances via Cloudflare.
 
-- [ ] Worker + DO skeleton with explicit DO SQLite schema
-- [ ] R2 bucket with verified Worker upload path
-- [ ] Simple Obsidian plugin:
-  - [ ] File watcher (vault.on('modify'))
-  - [ ] Fixed-size chunker (256KB)
-  - [ ] HTTP client for prepare/commit flow
-  - [ ] Local file index (JSON file in vault)
-  - [ ] File assembler (chunks → file)
+- [x] Worker + DO skeleton with explicit DO SQLite schema
+- [x] R2 bucket with verified Worker upload path
+- [x] Simple Obsidian plugin:
+  - [x] File watcher (`vault.on("create" | "modify" | "delete" | "rename")`)
+  - [x] Fixed-size chunker (256KB)
+  - [x] HTTP client for prepare/commit flow
+  - [x] Local file index in IndexedDB
+  - [x] File assembler (chunks → file)
 - [ ] End-to-end test: edit file on Device A → see it appear on Device B
 
 ### Phase 2: Real-time Sync
 
 **Goal**: Changes appear on other devices within seconds, automatically.
 
-- [ ] WebSocket connection from plugin to DO
-- [ ] DO broadcasts file changes to connected devices
-- [ ] Plugin pulls missing chunks on broadcast
-- [ ] Offline queue: changes buffered when disconnected, pushed on reconnect
-- [ ] Change-since-version endpoint for catch-up sync
+- [x] WebSocket connection from plugin to DO
+- [x] DO broadcasts file changes to connected devices
+- [x] Plugin pulls missing chunks on broadcast
+- [x] Offline queue: changes buffered when disconnected, pushed on reconnect
+- [x] Change-since-version endpoint for catch-up sync
 - [ ] Mobile smoke test: Android/iOS WebSocket reconnect and local queue persistence
 
 ### Phase 3: Conflict Handling
 
 **Goal**: Concurrent edits don't lose data.
 
-- [ ] DO detects version conflicts on commit
-- [ ] Plugin creates conflict copies
-- [ ] User notification in Obsidian
-- [ ] Soft deletes (file deletion = set deleted flag, don't remove from R2 immediately)
+- [x] DO detects version conflicts on commit
+- [x] Plugin creates conflict copies
+- [x] User notification in Obsidian
+- [x] Soft deletes (file deletion = set deleted flag, don't remove from R2 immediately)
 
 ### Phase 4: Robustness
 
 **Goal**: Production-quality reliability.
 
 - [ ] Rabin-Karp chunking (adapt from livesync)
-- [ ] Chunk deduplication across files
-- [ ] Debounced sync (batch rapid edits)
-- [ ] Startup full-index sync
+- [x] Chunk deduplication across files
+- [x] Debounced sync (batch rapid edits)
+- [x] Startup catch-up sync
 - [ ] Chunk garbage collection (R2 cleanup of unreferenced chunks)
 - [ ] Error handling and retry logic
 
@@ -674,9 +674,9 @@ It does NOT know file contents.
 
 ### Phase 7: Polish
 
-- [ ] Obsidian settings tab (vault ID, worker URL, encryption toggle)
+- [x] Obsidian settings tab (vault ID, worker URL, API key, device pairing)
 - [ ] Status bar indicator (sync state, last sync time)
-- [ ] Command palette commands (force sync, show sync status)
+- [x] Command palette commands (force sync, show sync status)
 - [ ] Full mobile hardening (background/resume, reconnects, storage pressure)
 - [ ] Plugin settings sync (hotkeys, themes — future)
 
