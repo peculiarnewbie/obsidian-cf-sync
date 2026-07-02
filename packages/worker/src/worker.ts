@@ -292,7 +292,7 @@ async function handleChunkUpload(
     .join("");
 
   if (computedHash !== hash.data) {
-    return new Response("Hash mismatch", { status: 400 });
+    return errorResponse({ error: "Hash mismatch", code: "HASH_MISMATCH" });
   }
 
   await env.CHUNKS_BUCKET.put(`chunks/${hash.data}`, body);

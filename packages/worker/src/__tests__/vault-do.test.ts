@@ -241,6 +241,108 @@ describe("Worker sync HTTP routes", () => {
     expect(resp.status).toBe(401);
   });
 
+  it("does not allow bootstrap tokens to authenticate sync routes", async () => {
+    const vaultId = "http-bootstrap-not-sync-vault";
+    await enrollDevice(vaultId);
+
+    const resp = await worker.fetch(
+      request("/sync/index", { method: "GET" }, vaultId, API_KEY),
+      workerEnv(),
+    );
+
+    expect(resp.status).toBe(401);
+  });
+
+  it("rejects prepare and commit bodies for a different authenticated device", async () => {
+    const vaultId = "http-device-mismatch-vault";
+    const authenticatedDeviceId = "http-device-authenticated";
+    const token = await enrollDevice(vaultId, authenticatedDeviceId);
+    const mismatchedOp = {
+      opId: "http-mismatch-op-1",
+      action: "put",
+      file: "notes/mismatch.md",
+      chunks: [],
+      mtime: 1000,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId: "http-device-body",
+    };
+
+    const prepareResp = await worker.fetch(
+      request(
+        "/sync/prepare",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mismatchedOp),
+        },
+        vaultId,
+        token,
+        authenticatedDeviceId,
+      ),
+      workerEnv(),
+    );
+    expect(prepareResp.status).toBe(403);
+
+    const commitResp = await worker.fetch(
+      request(
+        "/sync/commit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mismatchedOp),
+        },
+        vaultId,
+        token,
+        authenticatedDeviceId,
+      ),
+      workerEnv(),
+    );
+    expect(commitResp.status).toBe(403);
+  });
+
+  it("rejects chunk uploads when the body hash does not match the route hash", async () => {
+    const vaultId = "http-bad-chunk-vault";
+    const deviceId = "http-device-bad-chunk";
+    const token = await enrollDevice(vaultId, deviceId);
+    const data = new TextEncoder().encode("actual chunk body").buffer;
+
+    const resp = await worker.fetch(
+      request(
+        "/sync/chunk/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        { method: "PUT", body: data },
+        vaultId,
+        token,
+        deviceId,
+      ),
+      workerEnv(),
+    );
+
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toMatchObject({ code: "HASH_MISMATCH" });
+  });
+
+  it("rotates a device token when a device is re-enrolled", async () => {
+    const vaultId = "http-token-rotation-vault";
+    const deviceId = "http-device-rotated";
+    const oldToken = await enrollDevice(vaultId, deviceId);
+    const newToken = await enrollDevice(vaultId, deviceId);
+
+    expect(newToken).not.toBe(oldToken);
+
+    const oldTokenResp = await worker.fetch(
+      request("/sync/index", { method: "GET" }, vaultId, oldToken, deviceId),
+      workerEnv(),
+    );
+    expect(oldTokenResp.status).toBe(401);
+
+    const newTokenResp = await worker.fetch(
+      request("/sync/index", { method: "GET" }, vaultId, newToken, deviceId),
+      workerEnv(),
+    );
+    expect(newTokenResp.status).toBe(200);
+  });
+
   it("enrolls and revokes devices", async () => {
     const vaultId = "http-revoke-vault";
     const deviceId = "http-device-revoked";
