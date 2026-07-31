@@ -26,7 +26,7 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       name: "Show sync status",
       callback: () => {
         new Notice(
-          `Sync: ${this.syncEngine ? "active" : "inactive"}\nDevice: ${this.settings.deviceId}`,
+          `Sync: ${this.syncEngine?.active ? "active" : "inactive"}\nDevice: ${this.settings.deviceId}`,
         );
       },
     });
@@ -98,6 +98,6 @@ export default class ObsidianCfSyncPlugin extends Plugin {
     this.syncEngine?.stop();
     this.syncEngine = new SyncEngine(this.app, this.settings);
     await this.syncEngine.start();
-    new Notice("Sync started");
+    if (this.syncEngine.active) new Notice("Sync started");
   }
 }

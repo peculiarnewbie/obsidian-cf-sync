@@ -29,15 +29,20 @@ Implemented today:
 - IndexedDB local state for file metadata, pending operations, sync state, and chunk cache.
 - Device enrollment with per-device sync tokens.
 - Device revocation through the bootstrap API key.
+- Exact file-version compare-and-swap for every mutation.
+- Atomic, idempotent rename operations in one Durable Object transaction.
+- Vault-scoped authorization for chunk downloads, even though R2 deduplicates
+  physical chunk bodies globally.
 - Worker integration tests using `@cloudflare/vitest-pool-workers`.
+- Plugin unit tests for local state isolation and WebSocket lifecycle safety.
 
 Not implemented or incomplete:
 
 - End-to-end encryption.
 - Production-grade device approval UX and key rotation.
-- Rename as a first-class protocol operation. The current plugin handles rename as a delete of the old path and later push of the new file.
 - Conflict UX beyond creating local conflict copies and notices.
-- Plugin tests.
+- A user-directed reconciliation flow when a fresh local vault and remote
+  vault both already contain files. Sync safely pauses and reports a summary.
 - Release packaging/install automation for Obsidian.
 - Garbage collection for unreferenced R2 chunks.
 - Presigned download/upload URLs. The Worker currently proxies chunk upload and download.
@@ -139,4 +144,5 @@ After pairing, sync uses the generated device token. The bootstrap API key is on
 - `docs/architecture.md`: package and runtime architecture.
 - `docs/api.md`: current HTTP and WebSocket API.
 - `docs/development.md`: development, testing, deployment, and known gaps.
+- `docs/sync-redesign.md`: target synchronization model and staged migration plan.
 - `PLAN.md`: fuller product plan and intended architecture.

@@ -28,7 +28,7 @@ Command meanings:
 - `pnpm dev:worker`: runs `wrangler dev` for the Worker package.
 - `pnpm dev:plugin`: watches and rebuilds the Obsidian plugin with Vite.
 - `pnpm build:plugin`: builds the installable plugin folder at `packages/plugin/dist`.
-- `pnpm test`: runs Worker tests.
+- `pnpm test`: runs Worker and plugin tests.
 - `pnpm deploy`: deploys the Alchemy stack.
 
 ## Worker Development
@@ -62,11 +62,19 @@ Tests live in `packages/worker/src/__tests__/vault-do.test.ts` and cover:
 - Unknown chunk rejection.
 - Empty files.
 - Delete tombstones.
+- Exact-version rejection, atomic rename, and rename idempotency.
 - Two enrolled devices syncing create/delete changes through the same vault.
 - Revoked devices being blocked from future sync.
 - Auth rejection.
 - HTTP upload/prepare/commit/changes flow.
+- Vault-scoped chunk download authorization.
 - Vault isolation by `vaultId`.
+
+Plugin tests cover scoped local-state storage, durable pending-operation
+snapshots, retrying an upload after its live file is unavailable, and WebSocket
+lifecycle safety. They also cover remote-only and local-only first sync, the
+both-populated safety pause, and rejection of remote writes to unknown local
+files.
 
 ## Plugin Development
 
@@ -184,11 +192,10 @@ curl -H "Authorization: Bearer $DEVICE_TOKEN" -H "X-Vault-Id: $VAULT_ID" -H "X-D
 
 ## Known Development Gaps
 
-- Add plugin tests around file watching, local state, chunking, conflict copies, and reconnect catch-up.
+- Extend plugin tests to cover file watching, chunking, conflict copies, reconnect catch-up, and the serialized coordinator.
 - Add end-to-end tests that drive two simulated clients against one vault.
 - Add encryption before any production data use.
 - Add a better approval UX for device enrollment and support token rotation.
-- Add first-class rename protocol support.
 - Add chunk reference count updates and garbage collection.
 - Decide whether chunk downloads should remain proxied or move to signed URLs.
 - Add release packaging for Obsidian community/manual installation.

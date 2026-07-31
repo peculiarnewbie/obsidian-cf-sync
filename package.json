@@ -10,7 +10,7 @@
     "dev:worker": "pnpm --filter worker dev",
     "dev:plugin": "pnpm --filter plugin dev",
     "build:plugin": "pnpm --filter plugin build",
-    "test": "pnpm --filter worker test",
+    "test": "pnpm --filter worker test && pnpm --filter plugin test",
     "fmt": "vp fmt",
     "lint": "vp lint",
     "check": "vp check",

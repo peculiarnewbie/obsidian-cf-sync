@@ -1,5 +1,30 @@
-const DB_NAME = "obsidian-cf-sync";
+const DB_NAME_PREFIX = "obsidian-cf-sync";
 const DB_VERSION = 1;
+
+export interface LocalStateScope {
+  workerUrl: string;
+  vaultId: string;
+  deviceId: string;
+}
+
+/**
+ * Local sync metadata must never be shared between different remote vaults or
+ * devices. The encoded identity keeps database names valid even when a Worker
+ * is served from a path-prefixed development URL.
+ */
+export function localStateDatabaseName(scope: LocalStateScope): string {
+  const workerUrl = new URL(scope.workerUrl);
+  workerUrl.hash = "";
+  workerUrl.search = "";
+  workerUrl.pathname = workerUrl.pathname.replace(/\/+$/, "") || "/";
+
+  const identity = JSON.stringify({
+    workerUrl: workerUrl.toString(),
+    vaultId: scope.vaultId,
+    deviceId: scope.deviceId,
+  });
+  return `${DB_NAME_PREFIX}:${encodeURIComponent(identity)}`;
+}
 
 export interface LocalFileEntry {
   path: string;
@@ -7,6 +32,7 @@ export interface LocalFileEntry {
   mtime: number;
   fileVersion: number;
   globalVersion: number;
+  deleted: boolean;
 }
 
 export interface SyncState {
@@ -16,18 +42,20 @@ export interface SyncState {
 
 export interface PendingOp {
   opId: string;
-  action: "update" | "delete" | "rename";
+  action: "put" | "delete" | "rename";
   path: string;
   oldPath?: string;
   baseFileVersion: number;
+  oldBaseFileVersion?: number;
   chunks: string[];
   mtime: number;
   size: number;
+  createdAt: number;
 }
 
-function openDB(): Promise<IDBDatabase> {
+function openDB(name: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(name, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains("files")) {
@@ -84,11 +112,41 @@ function txGetAll<T>(db: IDBDatabase, store: string): Promise<T[]> {
   });
 }
 
+function pendingOpPaths(op: PendingOp): string[] {
+  return op.oldPath ? [op.path, op.oldPath] : [op.path];
+}
+
+function txReplacePendingOp(db: IDBDatabase, op: PendingOp): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("pendingOps", "readwrite");
+    const store = tx.objectStore("pendingOps");
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const affectedPaths = new Set(pendingOpPaths(op));
+      for (const existing of request.result as PendingOp[]) {
+        if (pendingOpPaths(existing).some((path) => affectedPaths.has(path))) {
+          store.delete(existing.opId);
+        }
+      }
+      store.put(op);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
 export class LocalState {
   private db!: IDBDatabase;
+  private readonly databaseName: string;
+
+  constructor(scope: LocalStateScope) {
+    this.databaseName = localStateDatabaseName(scope);
+  }
 
   async init(): Promise<void> {
-    this.db = await openDB();
+    this.db = await openDB(this.databaseName);
   }
 
   async getFile(path: string): Promise<LocalFileEntry | undefined> {
@@ -112,17 +170,27 @@ export class LocalState {
     return state ?? { globalVersion: 0, lastFullSync: 0 };
   }
 
+  async hasSyncState(): Promise<boolean> {
+    return (await txGet<SyncState>(this.db, "syncState", "sync")) !== undefined;
+  }
+
   async updateSyncState(patch: Partial<SyncState>): Promise<void> {
     const current = await this.getSyncState();
     return txPut(this.db, "syncState", { ...current, ...patch, key: "sync" });
   }
 
   async getPendingOps(): Promise<PendingOp[]> {
-    return txGetAll<PendingOp>(this.db, "pendingOps");
+    const ops = await txGetAll<PendingOp>(this.db, "pendingOps");
+    return ops.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
   }
 
-  async addPendingOp(op: PendingOp): Promise<void> {
-    return txPut(this.db, "pendingOps", op);
+  async getPendingOpAffectingPath(path: string): Promise<PendingOp | undefined> {
+    const ops = await this.getPendingOps();
+    return ops.find((op) => pendingOpPaths(op).includes(path));
+  }
+
+  async replacePendingOp(op: PendingOp): Promise<void> {
+    return txReplacePendingOp(this.db, op);
   }
 
   async removePendingOp(opId: string): Promise<void> {

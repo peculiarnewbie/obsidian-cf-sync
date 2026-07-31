@@ -105,7 +105,9 @@ describe("VaultDO", () => {
     // Changes since 0
     const changesResult = await stub.changes({ since: 0 });
     expect(changesResult.changes).toHaveLength(1);
-    expect(changesResult.globalVersion).toBe(1);
+    expect(changesResult.nextCursor).toBe(1);
+    expect(changesResult.highWatermark).toBe(1);
+    expect(changesResult.hasMore).toBe(false);
 
     // Full index
     const indexResult = await stub.getFullIndex();
@@ -113,7 +115,7 @@ describe("VaultDO", () => {
     expect(indexResult.files[0].path).toBe("notes/test.md");
   });
 
-  it("prepare detects conflict", async () => {
+  it("prepare requires the exact current file version", async () => {
     const stub = env.VaultDO.getByName("test-vault-conflict");
 
     await stub.registerChunk({ hash: "chunk-bbb", size: 60 });
@@ -142,6 +144,144 @@ describe("VaultDO", () => {
     expect(result.success).toBe(false);
     expect(result.conflict).toBe(true);
     expect(result.currentVersion).toBe(1);
+
+    const futureVersion = await stub.prepare({
+      opId: "op-conflict-future-version",
+      action: "put",
+      file: "notes/conflict.md",
+      chunks: ["chunk-bbb"],
+      mtime: 2000,
+      size: 60,
+      baseFileVersion: 2,
+      deviceId: "device-2",
+    });
+
+    expect(futureVersion).toMatchObject({
+      success: false,
+      conflict: true,
+      currentVersion: 1,
+    });
+
+    const futureCommit = await stub.commit({
+      opId: "op-conflict-future-commit",
+      action: "put",
+      file: "notes/conflict.md",
+      chunks: ["chunk-bbb"],
+      mtime: 2000,
+      size: 60,
+      baseFileVersion: 2,
+      deviceId: "device-2",
+    });
+    expect(futureCommit).toMatchObject({
+      success: false,
+      conflict: true,
+      currentVersion: 1,
+    });
+    expect((await stub.changes({ since: 0 })).changes).toHaveLength(1);
+  });
+
+  it("renames atomically with one durable change entry", async () => {
+    const stub = env.VaultDO.getByName("test-vault-atomic-rename");
+    await stub.registerChunk({ hash: "chunk-rename", size: 42 });
+    await stub.commit({
+      opId: "rename-source-put",
+      action: "put",
+      file: "notes/old.md",
+      chunks: ["chunk-rename"],
+      mtime: 1000,
+      size: 42,
+      baseFileVersion: 0,
+      deviceId: "device-1",
+    });
+
+    const result = await stub.commit({
+      opId: "rename-atomic-op",
+      action: "rename",
+      file: "notes/new.md",
+      oldPath: "notes/old.md",
+      chunks: ["chunk-rename"],
+      mtime: 2000,
+      size: 42,
+      baseFileVersion: 0,
+      oldBaseFileVersion: 1,
+      deviceId: "device-1",
+    });
+    expect(result).toMatchObject({ success: true, fileVersion: 1, globalVersion: 2 });
+
+    const index = await stub.getFullIndex();
+    expect(index).toMatchObject({ globalVersion: 2 });
+    expect(index.files).toEqual([
+      expect.objectContaining({
+        path: "notes/new.md",
+        fileVersion: 1,
+        globalVersion: 2,
+        chunks: ["chunk-rename"],
+      }),
+    ]);
+
+    const changes = await stub.changes({ since: 1 });
+    expect(changes.changes).toEqual([
+      expect.objectContaining({
+        globalVersion: 2,
+        action: "rename",
+        path: "notes/new.md",
+        oldPath: "notes/old.md",
+        oldFileVersion: 2,
+        fileVersion: 1,
+      }),
+    ]);
+
+    const retry = await stub.commit({
+      opId: "rename-atomic-op",
+      action: "rename",
+      file: "notes/new.md",
+      oldPath: "notes/old.md",
+      chunks: ["chunk-rename"],
+      mtime: 2000,
+      size: 42,
+      baseFileVersion: 0,
+      oldBaseFileVersion: 1,
+      deviceId: "device-1",
+    });
+    expect(retry).toMatchObject({
+      success: true,
+      alreadyCommitted: true,
+      fileVersion: 1,
+      globalVersion: 2,
+    });
+  });
+
+  it("leaves both paths and the log untouched when a rename conflicts", async () => {
+    const stub = env.VaultDO.getByName("test-vault-atomic-rename-conflict");
+    await stub.commit({
+      opId: "rename-conflict-source-put",
+      action: "put",
+      file: "notes/old.md",
+      chunks: [],
+      mtime: 1000,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId: "device-1",
+    });
+
+    const result = await stub.commit({
+      opId: "rename-conflict-op",
+      action: "rename",
+      file: "notes/new.md",
+      oldPath: "notes/old.md",
+      chunks: [],
+      mtime: 2000,
+      size: 0,
+      baseFileVersion: 0,
+      oldBaseFileVersion: 0,
+      deviceId: "device-2",
+    });
+    expect(result).toMatchObject({ success: false, conflict: true, currentVersion: 1 });
+
+    const index = await stub.getFullIndex();
+    expect(index).toMatchObject({ globalVersion: 1 });
+    expect(index.files).toEqual([expect.objectContaining({ path: "notes/old.md" })]);
+    expect((await stub.changes({ since: 0 })).changes).toHaveLength(1);
   });
 
   it("commit rejects unknown chunks", async () => {
@@ -209,6 +349,54 @@ describe("VaultDO", () => {
     const changesResult = await stub.changes({ since: 0 });
     expect(changesResult.changes[0].action).toBe("delete");
   });
+
+  it("returns stable, bounded change pages", async () => {
+    const stub = env.VaultDO.getByName("test-vault-change-pages");
+
+    for (const suffix of ["one", "two", "three"]) {
+      await stub.commit({
+        opId: `page-${suffix}`,
+        action: "delete",
+        file: `notes/${suffix}.md`,
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      });
+    }
+
+    const firstPage = await stub.changes({ since: 0, limit: 2 });
+    expect(firstPage.changes.map((change) => change.globalVersion)).toEqual([1, 2]);
+    expect(firstPage.nextCursor).toBe(2);
+    expect(firstPage.highWatermark).toBe(3);
+    expect(firstPage.hasMore).toBe(true);
+
+    await stub.commit({
+      opId: "page-four",
+      action: "delete",
+      file: "notes/four.md",
+      chunks: [],
+      mtime: 1000,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId: "device-1",
+    });
+
+    const secondPage = await stub.changes({
+      since: firstPage.nextCursor,
+      through: firstPage.highWatermark,
+      limit: 2,
+    });
+    expect(secondPage.changes.map((change) => change.globalVersion)).toEqual([3]);
+    expect(secondPage.nextCursor).toBe(3);
+    expect(secondPage.highWatermark).toBe(3);
+    expect(secondPage.hasMore).toBe(false);
+
+    const nextWindow = await stub.changes({ since: secondPage.nextCursor, limit: 2 });
+    expect(nextWindow.changes.map((change) => change.globalVersion)).toEqual([4]);
+    expect(nextWindow.highWatermark).toBe(4);
+  });
 });
 
 describe("Worker sync HTTP routes", () => {
@@ -239,6 +427,32 @@ describe("Worker sync HTTP routes", () => {
     const resp = await worker.fetch(request("/sync/index", { method: "GET" }), workerEnv());
 
     expect(resp.status).toBe(401);
+  });
+
+  it("rejects an invalid change window", async () => {
+    const vaultId = "http-invalid-change-window";
+    const token = await enrollDevice(vaultId);
+
+    const resp = await worker.fetch(
+      request("/sync/changes?since=2&through=1", { method: "GET" }, vaultId, token),
+      workerEnv(),
+    );
+
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toMatchObject({ code: "INVALID_CHANGE_WINDOW" });
+  });
+
+  it("rejects fractional change cursors", async () => {
+    const vaultId = "http-fractional-change-cursor";
+    const token = await enrollDevice(vaultId);
+
+    const resp = await worker.fetch(
+      request("/sync/changes?since=0.5", { method: "GET" }, vaultId, token),
+      workerEnv(),
+    );
+
+    expect(resp.status).toBe(400);
+    expect(await resp.json()).toMatchObject({ code: "INVALID_CHANGE_QUERY" });
   });
 
   it("does not allow bootstrap tokens to authenticate sync routes", async () => {
@@ -320,6 +534,82 @@ describe("Worker sync HTTP routes", () => {
 
     expect(resp.status).toBe(400);
     expect(await resp.json()).toMatchObject({ code: "HASH_MISMATCH" });
+  });
+
+  it("enforces chunk and manifest limits before mutating vault state", async () => {
+    const vaultId = "http-limits-vault";
+    const deviceId = "http-limits-device";
+    const token = await enrollDevice(vaultId, deviceId);
+    const oversizedChunk = new Uint8Array(512 * 1024 + 1).buffer;
+
+    const chunkResp = await worker.fetch(
+      request(
+        `/sync/chunk/${"a".repeat(64)}`,
+        { method: "PUT", body: oversizedChunk },
+        vaultId,
+        token,
+        deviceId,
+      ),
+      workerEnv(),
+    );
+    expect(chunkResp.status).toBe(413);
+    expect(await chunkResp.json()).toMatchObject({ code: "CHUNK_TOO_LARGE" });
+
+    const batchedManifest = {
+      opId: "http-batched-chunks",
+      action: "put",
+      file: "notes/batched.md",
+      chunks: Array.from({ length: 101 }, (_, index) => index.toString(16).padStart(64, "a")),
+      mtime: 1000,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId,
+    };
+    const batchedManifestResp = await worker.fetch(
+      request(
+        "/sync/prepare",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(batchedManifest),
+        },
+        vaultId,
+        token,
+        deviceId,
+      ),
+      workerEnv(),
+    );
+    expect(batchedManifestResp.status).toBe(200);
+    const batchedManifestResult = await batchedManifestResp.json();
+    expect(batchedManifestResult).toMatchObject({ success: true });
+    expect(batchedManifestResult.missing).toHaveLength(101);
+
+    const tooManyChunks = {
+      opId: "http-too-many-chunks",
+      action: "put",
+      file: "notes/too-many.md",
+      chunks: Array.from({ length: 4097 }, () => "a".repeat(64)),
+      mtime: 1000,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId,
+    };
+    const manifestResp = await worker.fetch(
+      request(
+        "/sync/prepare",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tooManyChunks),
+        },
+        vaultId,
+        token,
+        deviceId,
+      ),
+      workerEnv(),
+    );
+    expect(manifestResp.status).toBe(400);
+    expect(await manifestResp.json()).toMatchObject({ code: "INVALID_REQUEST" });
   });
 
   it("rotates a device token when a device is re-enrolled", async () => {
@@ -446,6 +736,36 @@ describe("Worker sync HTTP routes", () => {
     const changes = decodeUnknownSync(ChangesResponse)(await changesResp.json());
     expect(changes.changes).toHaveLength(1);
     expect(changes.changes[0]?.path).toBe("notes/http.md");
+  });
+
+  it("only serves a chunk to devices whose vault registered it", async () => {
+    const vaultA = "http-chunk-auth-vault-a";
+    const vaultB = "http-chunk-auth-vault-b";
+    const deviceA = "http-chunk-auth-device-a";
+    const deviceB = "http-chunk-auth-device-b";
+    const tokenA = await enrollDevice(vaultA, deviceA);
+    const tokenB = await enrollDevice(vaultB, deviceB);
+    const data = new TextEncoder().encode("vault-scoped chunk").buffer;
+    const hash = await sha256Hex(data);
+
+    const upload = await worker.fetch(
+      request(`/sync/chunk/${hash}`, { method: "PUT", body: data }, vaultA, tokenA, deviceA),
+      workerEnv(),
+    );
+    expect(upload.status).toBe(200);
+
+    const ownerDownload = await worker.fetch(
+      request(`/sync/chunk/${hash}`, { method: "GET" }, vaultA, tokenA, deviceA),
+      workerEnv(),
+    );
+    expect(ownerDownload.status).toBe(200);
+    expect(await ownerDownload.arrayBuffer()).toEqual(data);
+
+    const otherVaultDownload = await worker.fetch(
+      request(`/sync/chunk/${hash}`, { method: "GET" }, vaultB, tokenB, deviceB),
+      workerEnv(),
+    );
+    expect(otherVaultDownload.status).toBe(404);
   });
 
   it("isolates file indexes by vaultId", async () => {

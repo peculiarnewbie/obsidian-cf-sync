@@ -5,6 +5,7 @@ export interface WSMessage {
 
 export type MessageHandler = (msg: WSMessage) => void;
 export type ConnectHandler = () => void;
+type WebSocketFactory = (url: string) => WebSocket;
 
 export class ConnectionManager {
   private ws: WebSocket | null = null;
@@ -16,10 +17,19 @@ export class ConnectionManager {
   private maxReconnectDelay = 30000;
   private _connected = false;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private shouldReconnect = false;
+  private createWebSocket: WebSocketFactory;
 
-  constructor(workerUrl: string, deviceToken: string, vaultId: string, deviceId: string) {
+  constructor(
+    workerUrl: string,
+    deviceToken: string,
+    vaultId: string,
+    deviceId: string,
+    createWebSocket: WebSocketFactory = (url) => new WebSocket(url),
+  ) {
     const params = new URLSearchParams({ token: deviceToken, vaultId, deviceId });
     this.url = `${workerUrl.replace(/^http/, "ws")}/sync/ws?${params.toString()}`;
+    this.createWebSocket = createWebSocket;
   }
 
   get connected(): boolean {
@@ -35,16 +45,25 @@ export class ConnectionManager {
   }
 
   connect(): void {
-    if (this.ws?.readyState === WebSocket.OPEN) return;
+    this.shouldReconnect = true;
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
 
+    let socket: WebSocket;
     try {
-      this.ws = new WebSocket(this.url);
+      socket = this.createWebSocket(this.url);
     } catch {
       this.scheduleReconnect();
       return;
     }
+    this.ws = socket;
 
-    this.ws.onopen = () => {
+    socket.onopen = () => {
+      if (this.ws !== socket || !this.shouldReconnect) {
+        socket.close();
+        return;
+      }
       this._connected = true;
       this.reconnectDelay = 1000;
       this.startPing();
@@ -53,7 +72,8 @@ export class ConnectionManager {
       }
     };
 
-    this.ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (this.ws !== socket || !this.shouldReconnect) return;
       try {
         const msg = JSON.parse(event.data as string) as WSMessage;
         for (const handler of this.handlers) {
@@ -64,28 +84,33 @@ export class ConnectionManager {
       }
     };
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      if (this.ws !== socket) return;
+      this.ws = null;
       this._connected = false;
       this.stopPing();
-      this.scheduleReconnect();
+      if (this.shouldReconnect) this.scheduleReconnect();
     };
 
-    this.ws.onerror = () => {
+    socket.onerror = () => {
+      if (this.ws !== socket) return;
       this._connected = false;
       this.stopPing();
-      this.ws?.close();
+      socket.close();
     };
   }
 
   disconnect(): void {
+    this.shouldReconnect = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     this.stopPing();
     this._connected = false;
-    this.ws?.close();
+    const socket = this.ws;
     this.ws = null;
+    socket?.close();
   }
 
   private startPing(): void {
@@ -104,7 +129,7 @@ export class ConnectionManager {
   }
 
   private scheduleReconnect(): void {
-    if (this.reconnectTimer) return;
+    if (!this.shouldReconnect || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

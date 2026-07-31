@@ -47,7 +47,7 @@ export type FileVersion = Schema.Schema.Type<typeof FileVersion>;
 export const GlobalVersion = NonNegativeInteger.pipe(Schema.brand("GlobalVersion"));
 export type GlobalVersion = Schema.Schema.Type<typeof GlobalVersion>;
 
-export const SyncAction = Schema.Literals(["put", "delete"]);
+export const SyncAction = Schema.Literals(["put", "delete", "rename"]);
 export type SyncAction = Schema.Schema.Type<typeof SyncAction>;
 
 export const SyncRequestHeaders = Schema.Struct({
@@ -61,8 +61,16 @@ export const DeviceAuthHeaders = Schema.Struct({
 });
 export type DeviceAuthHeaders = Schema.Schema.Type<typeof DeviceAuthHeaders>;
 
+const ChangesQueryVersion = Schema.NumberFromString.check(Schema.isGreaterThanOrEqualTo(0));
+const ChangesPageLimit = Schema.NumberFromString.check(
+  Schema.isGreaterThanOrEqualTo(1),
+  Schema.isLessThanOrEqualTo(100),
+);
+
 export const ChangesQuery = Schema.Struct({
-  since: Schema.NumberFromString.check(Schema.isGreaterThanOrEqualTo(0)),
+  since: ChangesQueryVersion,
+  through: Schema.optionalKey(ChangesQueryVersion),
+  limit: Schema.optionalKey(ChangesPageLimit),
 });
 export type ChangesQuery = Schema.Schema.Type<typeof ChangesQuery>;
 
@@ -72,12 +80,18 @@ export const ChunkParams = Schema.Struct({
 export type ChunkParams = Schema.Schema.Type<typeof ChunkParams>;
 
 export const EmptyChunkList = Schema.Array(ChunkHash).check(Schema.isLengthBetween(0, 0));
+/**
+ * Bound file manifests so a single request stays within Durable Object resource
+ * limits. With the plugin's 256 KiB chunks this permits files up to 1 GiB while
+ * keeping a manifest practical to validate and retry.
+ */
+export const ChunkList = Schema.Array(ChunkHash).check(Schema.isLengthBetween(0, 4096));
 
 export const PutFileRequest = Schema.Struct({
   opId: OpId,
   action: Schema.Literal("put"),
   file: FilePath,
-  chunks: Schema.Array(ChunkHash),
+  chunks: ChunkList,
   mtime: Mtime,
   size: ByteSize,
   baseFileVersion: FileVersion,
@@ -95,7 +109,20 @@ export const DeleteFileRequest = Schema.Struct({
   deviceId: DeviceId,
 });
 
-export const PrepareRequest = Schema.Union([PutFileRequest, DeleteFileRequest]);
+export const RenameFileRequest = Schema.Struct({
+  opId: OpId,
+  action: Schema.Literal("rename"),
+  file: FilePath,
+  oldPath: FilePath,
+  chunks: ChunkList,
+  mtime: Mtime,
+  size: ByteSize,
+  baseFileVersion: FileVersion,
+  oldBaseFileVersion: FileVersion,
+  deviceId: DeviceId,
+});
+
+export const PrepareRequest = Schema.Union([PutFileRequest, DeleteFileRequest, RenameFileRequest]);
 export type PrepareRequest = Schema.Schema.Type<typeof PrepareRequest>;
 
 export const CommitRequest = PrepareRequest;
@@ -120,7 +147,7 @@ export const ConflictResponse = Schema.Struct({
   success: Schema.Literal(false),
   conflict: Schema.Literal(true),
   currentVersion: FileVersion,
-  currentChunks: Schema.optionalKey(Schema.Array(ChunkHash)),
+  currentChunks: Schema.optionalKey(ChunkList),
 });
 export type ConflictResponse = Schema.Schema.Type<typeof ConflictResponse>;
 
@@ -158,10 +185,11 @@ export const ChangeRecord = Schema.Struct({
   opId: OpId,
   path: FilePath,
   oldPath: Schema.NullOr(FilePath),
+  oldFileVersion: Schema.NullOr(FileVersion),
   action: SyncAction,
   fileVersion: FileVersion,
   deviceId: DeviceId,
-  chunks: Schema.Array(ChunkHash),
+  chunks: ChunkList,
   mtime: Mtime,
   size: ByteSize,
   timestamp: Mtime,
@@ -170,13 +198,15 @@ export type ChangeRecord = Schema.Schema.Type<typeof ChangeRecord>;
 
 export const ChangesResponse = Schema.Struct({
   changes: Schema.Array(ChangeRecord),
-  globalVersion: GlobalVersion,
+  nextCursor: GlobalVersion,
+  highWatermark: GlobalVersion,
+  hasMore: Schema.Boolean,
 });
 export type ChangesResponse = Schema.Schema.Type<typeof ChangesResponse>;
 
 export const FileIndexEntry = Schema.Struct({
   path: FilePath,
-  chunks: Schema.Array(ChunkHash),
+  chunks: ChunkList,
   mtime: Mtime,
   size: ByteSize,
   fileVersion: FileVersion,

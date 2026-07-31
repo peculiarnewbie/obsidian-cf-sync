@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type * as cf from "@cloudflare/workers-types";
 import {
   ChunkHash as ChunkHashSchema,
+  ChangesQuery as ChangesQuerySchema,
   CommitRequest as CommitRequestSchema,
   DeviceEnrollmentRequest as DeviceEnrollmentRequestSchema,
   PrepareRequest as PrepareRequestSchema,
@@ -9,6 +10,7 @@ import {
   VaultId as VaultIdSchema,
   decodeUnknownSync,
   type CommitRequest,
+  type ChangesQuery,
   type DeviceEnrollmentRequest,
   type PrepareRequest,
   type RevokeDeviceRequest,
@@ -21,14 +23,13 @@ interface Env {
   VaultDO: cf.DurableObjectNamespace;
 }
 
-interface ChangesRequest {
-  since: number;
-}
-
 interface RpcContext {
   vaultId: VaultId;
   deviceId?: string;
 }
+
+const MAX_CHUNK_BYTES = 512 * 1024;
+const MAX_SQL_BOUND_PARAMETERS = 100;
 
 // JSON error response helper
 function errorResponse(
@@ -102,21 +103,33 @@ export default {
         return await handleRpc(env, authenticatedContext, "commit", validated.data);
       }
       if (path === "/sync/changes" && request.method === "GET") {
-        const sinceParam = url.searchParams.get("since");
-        const sinceValue = sinceParam !== null ? parseInt(sinceParam, 10) : 0;
-        if (isNaN(sinceValue) || sinceValue < 0) {
+        const query = decodeRequest(ChangesQuerySchema, {
+          since: url.searchParams.get("since") ?? "0",
+          ...(url.searchParams.has("through") ? { through: url.searchParams.get("through") } : {}),
+          ...(url.searchParams.has("limit") ? { limit: url.searchParams.get("limit") } : {}),
+        });
+        if (!query.ok) {
+          return errorResponse({ error: query.error, code: "INVALID_CHANGE_QUERY" });
+        }
+        if (!isValidChangesQuery(query.data)) {
           return errorResponse({
-            error: "since must be a non-negative number",
-            code: "INVALID_SINCE",
+            error: "since, through, and limit must be safe integers within their allowed ranges",
+            code: "INVALID_CHANGE_QUERY",
           });
         }
-        return await handleRpc(env, authenticatedContext, "changes", { since: sinceValue });
+        if (query.data.through !== undefined && query.data.through < query.data.since) {
+          return errorResponse({
+            error: "through must be greater than or equal to since",
+            code: "INVALID_CHANGE_WINDOW",
+          });
+        }
+        return await handleRpc(env, authenticatedContext, "changes", query.data);
       }
       if (path === "/sync/index" && request.method === "GET") {
         return await handleRpc(env, authenticatedContext, "getFullIndex", undefined);
       }
       if (path.startsWith("/sync/chunk/") && request.method === "GET") {
-        return await handleChunkDownload(request, env);
+        return await handleChunkDownload(request, env, authenticatedContext);
       }
 
       return new Response("Not found", { status: 404 });
@@ -190,6 +203,17 @@ function decodeRequest<T>(
   }
 }
 
+function isValidChangesQuery({ since, through, limit = 100 }: ChangesQuery): boolean {
+  return (
+    Number.isSafeInteger(since) &&
+    since >= 0 &&
+    (through === undefined || (Number.isSafeInteger(through) && through >= 0)) &&
+    Number.isSafeInteger(limit) &&
+    limit >= 1 &&
+    limit <= 100
+  );
+}
+
 function corsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": "*",
@@ -200,17 +224,17 @@ function corsHeaders(): Record<string, string> {
 
 function handleRouteError(e: unknown): Response {
   if (e instanceof Error) {
-    return Response.json({ error: e.message }, { status: 500 });
+    return Response.json({ error: e.message, code: "INTERNAL_ERROR" }, { status: 500 });
   }
-  return Response.json({ error: "Internal server error" }, { status: 500 });
+  return Response.json({ error: "Internal server error", code: "INTERNAL_ERROR" }, { status: 500 });
 }
 
-type RpcBody = PrepareRequest | CommitRequest | ChangesRequest | undefined;
+type RpcBody = PrepareRequest | CommitRequest | ChangesQuery | undefined;
 
 type VaultDOStub = {
   prepare(body: PrepareRequest): Promise<unknown>;
   commit(body: CommitRequest): Promise<unknown>;
-  changes(body: { since: number }): Promise<unknown>;
+  changes(body: ChangesQuery): Promise<unknown>;
   getFullIndex(): Promise<unknown>;
   registerChunk(body: { hash: string; size: number }): Promise<{ success: true }>;
   enrollDevice(
@@ -218,6 +242,7 @@ type VaultDOStub = {
   ): Promise<{ success: true; deviceId: string }>;
   revokeDevice(body: RevokeDeviceRequest): Promise<{ success: true; deviceId: string }>;
   validateDevice(body: { deviceId: string; tokenHash: string }): Promise<{ valid: boolean }>;
+  hasChunk(body: { hash: string }): Promise<{ exists: boolean }>;
   fetch(request: Request): Promise<Response>;
 };
 
@@ -251,7 +276,7 @@ async function handleRpc(
 ): Promise<Response> {
   const stub = env.VaultDO.getByName(context.vaultId) as unknown as VaultDOStub;
   if (method === "changes") {
-    const result = await stub.changes({ since: (body as ChangesRequest)?.since ?? 0 });
+    const result = await stub.changes((body as ChangesQuery | undefined) ?? { since: 0 });
     return Response.json(result);
   }
   if (method === "getFullIndex") {
@@ -285,7 +310,21 @@ async function handleChunkUpload(
   const hash = decodeRequest(ChunkHashSchema, rawHash);
   if (!hash.ok) return errorResponse(hash);
 
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength !== null) {
+    const declaredSize = Number(contentLength);
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+      return errorResponse({ error: "Invalid Content-Length", code: "INVALID_CONTENT_LENGTH" });
+    }
+    if (declaredSize > MAX_CHUNK_BYTES) {
+      return errorResponse({ error: "Chunk exceeds 512 KiB limit", code: "CHUNK_TOO_LARGE" }, 413);
+    }
+  }
+
   const body = await request.arrayBuffer();
+  if (body.byteLength > MAX_CHUNK_BYTES) {
+    return errorResponse({ error: "Chunk exceeds 512 KiB limit", code: "CHUNK_TOO_LARGE" }, 413);
+  }
   const digest = await crypto.subtle.digest("SHA-256", body);
   const computedHash = Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -318,12 +357,21 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
-async function handleChunkDownload(request: Request, env: Env): Promise<Response> {
+async function handleChunkDownload(
+  request: Request,
+  env: Env,
+  context: RpcContext,
+): Promise<Response> {
   const url = new URL(request.url);
   const rawHash = url.pathname.split("/").pop();
   if (!rawHash) return new Response("Missing hash", { status: 400 });
   const hash = decodeRequest(ChunkHashSchema, rawHash);
   if (!hash.ok) return errorResponse(hash);
+
+  const stub = env.VaultDO.getByName(context.vaultId) as unknown as VaultDOStub;
+  if (!(await stub.hasChunk({ hash: hash.data })).exists) {
+    return new Response("Not found", { status: 404 });
+  }
 
   const obj = await env.CHUNKS_BUCKET.get(`chunks/${hash.data}`);
   if (!obj) return new Response("Not found", { status: 404 });
@@ -361,6 +409,7 @@ export class VaultDO extends DurableObject {
         op_id TEXT NOT NULL UNIQUE,
         path TEXT NOT NULL,
         old_path TEXT,
+        old_file_version INTEGER,
         action TEXT NOT NULL,
         file_version INTEGER NOT NULL,
         device_id TEXT NOT NULL,
@@ -406,6 +455,7 @@ export class VaultDO extends DurableObject {
     `);
     this.addColumnIfMissing("devices", "token_hash", "TEXT");
     this.addColumnIfMissing("devices", "enrolled_at", "INTEGER");
+    this.addColumnIfMissing("changes", "old_file_version", "INTEGER");
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string) {
@@ -435,6 +485,12 @@ export class VaultDO extends DurableObject {
       );
     }
     return { success: true };
+  }
+
+  async hasChunk(body: { hash: string }): Promise<{ exists: boolean }> {
+    return {
+      exists: this.queryOne("SELECT hash FROM chunks WHERE hash = ?", body.hash) !== undefined,
+    };
   }
 
   async enrollDevice(
@@ -500,12 +556,12 @@ export class VaultDO extends DurableObject {
     }
 
     const current = this.queryOne(
-      "SELECT file_version, chunks_json FROM files WHERE path = ?",
+      "SELECT file_version, chunks_json, deleted FROM files WHERE path = ?",
       file,
     );
     const currentVersion = Number(current?.file_version ?? 0);
 
-    if (currentVersion > 0 && baseFileVersion < currentVersion) {
+    if (currentVersion !== baseFileVersion) {
       return {
         success: false,
         conflict: true,
@@ -514,74 +570,90 @@ export class VaultDO extends DurableObject {
       };
     }
 
-    const known =
-      chunks.length === 0
-        ? new Set<string>()
-        : new Set(
-            this.sql
-              .exec(
-                `SELECT hash FROM chunks WHERE hash IN (${chunks.map(() => "?").join(",")})`,
-                ...chunks,
-              )
-              .toArray()
-              .map((row) => String(row.hash)),
-          );
-    const missing = chunks.filter((hash) => !known.has(hash));
+    if (body.action === "rename") {
+      if (current && Number(current.deleted) === 0) {
+        return {
+          success: false,
+          conflict: true,
+          currentVersion,
+          currentChunks: JSON.parse(String(current.chunks_json)),
+        };
+      }
+      const source = this.queryOne(
+        "SELECT file_version, chunks_json, deleted FROM files WHERE path = ?",
+        body.oldPath,
+      );
+      const sourceVersion = Number(source?.file_version ?? 0);
+      if (
+        body.oldPath === body.file ||
+        source === undefined ||
+        Number(source.deleted) !== 0 ||
+        sourceVersion !== body.oldBaseFileVersion
+      ) {
+        return {
+          success: false,
+          conflict: true,
+          currentVersion: sourceVersion,
+          currentChunks: source ? JSON.parse(String(source.chunks_json)) : [],
+        };
+      }
+    }
 
     return {
       success: true,
-      missing,
+      missing: body.action === "delete" ? [] : this.missingChunks(chunks),
       currentVersion,
     };
   }
 
   async commit(body: CommitRequest) {
-    const { opId, action, file, chunks, mtime, size, baseFileVersion, deviceId } = body;
+    const result = this.ctx.storage.transactionSync(() => this.commitTransaction(body));
+    if (result.success && !("alreadyCommitted" in result)) {
+      this.broadcast({
+        type: "file_changed",
+        action: body.action,
+        file: body.file,
+        oldPath: body.action === "rename" ? body.oldPath : null,
+        fileVersion: result.fileVersion,
+        globalVersion: result.globalVersion,
+        deviceId: body.deviceId,
+      });
+    }
+    return result;
+  }
 
+  private commitTransaction(body: CommitRequest) {
     const existingOp = this.queryOne(
       "SELECT global_version, file_version FROM changes WHERE op_id = ?",
-      opId,
+      body.opId,
     );
     if (existingOp) {
       return {
-        success: true,
-        alreadyCommitted: true,
+        success: true as const,
+        alreadyCommitted: true as const,
         globalVersion: Number(existingOp.global_version),
         fileVersion: Number(existingOp.file_version),
       };
     }
 
     const current = this.queryOne(
-      "SELECT file_version, global_version FROM files WHERE path = ?",
-      file,
+      "SELECT file_version, global_version, chunks_json, deleted FROM files WHERE path = ?",
+      body.file,
     );
     const currentVersion = Number(current?.file_version ?? 0);
-
-    if (currentVersion > 0 && baseFileVersion < currentVersion) {
-      const conflictId = crypto.randomUUID();
-      this.sql.exec(
-        `INSERT INTO conflicts (conflict_id, path, winning_global_version, losing_device_id, losing_chunks_json, losing_mtime, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        conflictId,
-        file,
-        Number(current?.global_version ?? 0),
-        deviceId,
-        JSON.stringify(chunks),
-        mtime,
-        Date.now(),
-      );
-      return {
-        success: false,
-        conflict: true,
-        currentVersion,
-      };
+    if (currentVersion !== body.baseFileVersion) {
+      return this.recordConflict(body, current, currentVersion);
     }
 
-    if (action === "put") {
-      const missingChunk = findMissingChunk(this.sql, chunks);
+    if (body.action === "rename") {
+      return this.commitRenameTransaction(body, current, currentVersion);
+    }
+
+    if (body.action === "put") {
+      const missingChunk = findMissingChunk(this.sql, body.chunks);
       if (missingChunk) {
         return {
-          success: false,
+          success: false as const,
           error: `Chunk ${missingChunk} not registered. Upload it first.`,
           code: "CHUNK_NOT_REGISTERED",
         };
@@ -591,78 +663,255 @@ export class VaultDO extends DurableObject {
     const nextGlobalVersion = this.nextGlobalVersion();
     const nextFileVersion = currentVersion + 1;
     const now = Date.now();
-    const chunksJson = JSON.stringify(chunks);
-
-    if (action === "delete") {
-      this.sql.exec(
-        `INSERT OR REPLACE INTO files
-         (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
-         VALUES (?, '[]', ?, 0, ?, ?, 1, ?, ?)`,
-        file,
-        mtime,
-        nextFileVersion,
-        nextGlobalVersion,
-        deviceId,
+    const chunksJson = JSON.stringify(body.chunks);
+    if (body.action === "delete") {
+      this.writeFile({
+        path: body.file,
+        chunksJson: "[]",
+        mtime: body.mtime,
+        size: 0,
+        fileVersion: nextFileVersion,
+        globalVersion: nextGlobalVersion,
+        deleted: true,
+        deviceId: body.deviceId,
         now,
-      );
+      });
     } else {
-      this.sql.exec(
-        `INSERT OR REPLACE INTO files
-         (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-        file,
+      this.writeFile({
+        path: body.file,
         chunksJson,
-        mtime,
-        size,
-        nextFileVersion,
-        nextGlobalVersion,
-        deviceId,
+        mtime: body.mtime,
+        size: body.size,
+        fileVersion: nextFileVersion,
+        globalVersion: nextGlobalVersion,
+        deleted: false,
+        deviceId: body.deviceId,
         now,
-      );
+      });
     }
-    this.sql.exec(
-      `INSERT INTO changes
-       (global_version, op_id, path, action, file_version, device_id, chunks_json, mtime, size, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      nextGlobalVersion,
-      opId,
-      file,
-      action,
-      nextFileVersion,
-      deviceId,
-      action === "delete" ? "[]" : chunksJson,
-      mtime,
-      action === "delete" ? 0 : size,
-      now,
-    );
-    this.sql.exec(
-      `INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('globalVersion', ?)`,
-      String(nextGlobalVersion),
-    );
-
-    this.broadcast({
-      type: "file_changed",
-      action,
-      file,
-      fileVersion: nextFileVersion,
+    this.writeChange({
       globalVersion: nextGlobalVersion,
-      deviceId,
+      opId: body.opId,
+      path: body.file,
+      oldPath: null,
+      oldFileVersion: null,
+      action: body.action,
+      fileVersion: nextFileVersion,
+      deviceId: body.deviceId,
+      chunksJson: body.action === "delete" ? "[]" : chunksJson,
+      mtime: body.mtime,
+      size: body.action === "delete" ? 0 : body.size,
+      now,
     });
+    this.setGlobalVersion(nextGlobalVersion);
 
     return {
-      success: true,
+      success: true as const,
       fileVersion: nextFileVersion,
       globalVersion: nextGlobalVersion,
     };
   }
 
-  async changes(body: { since: number }) {
-    const sinceVersion = body.since;
-    const globalVersion = this.getGlobalVersion();
+  private commitRenameTransaction(
+    body: Extract<CommitRequest, { action: "rename" }>,
+    destination: Record<string, unknown> | undefined,
+    destinationVersion: number,
+  ) {
+    const source = this.queryOne(
+      "SELECT file_version, global_version, chunks_json, deleted FROM files WHERE path = ?",
+      body.oldPath,
+    );
+    const sourceVersion = Number(source?.file_version ?? 0);
+    if (
+      body.oldPath === body.file ||
+      source === undefined ||
+      Number(source.deleted) !== 0 ||
+      sourceVersion !== body.oldBaseFileVersion
+    ) {
+      return this.recordConflict(body, source, sourceVersion);
+    }
+    if (destination && Number(destination.deleted) === 0) {
+      return this.recordConflict(body, destination, destinationVersion);
+    }
+
+    const missingChunk = findMissingChunk(this.sql, body.chunks);
+    if (missingChunk) {
+      return {
+        success: false as const,
+        error: `Chunk ${missingChunk} not registered. Upload it first.`,
+        code: "CHUNK_NOT_REGISTERED",
+      };
+    }
+
+    const nextGlobalVersion = this.nextGlobalVersion();
+    const destinationFileVersion = destinationVersion + 1;
+    const sourceFileVersion = sourceVersion + 1;
+    const now = Date.now();
+    const chunksJson = JSON.stringify(body.chunks);
+    this.writeFile({
+      path: body.file,
+      chunksJson,
+      mtime: body.mtime,
+      size: body.size,
+      fileVersion: destinationFileVersion,
+      globalVersion: nextGlobalVersion,
+      deleted: false,
+      deviceId: body.deviceId,
+      now,
+    });
+    this.writeFile({
+      path: body.oldPath,
+      chunksJson: "[]",
+      mtime: body.mtime,
+      size: 0,
+      fileVersion: sourceFileVersion,
+      globalVersion: nextGlobalVersion,
+      deleted: true,
+      deviceId: body.deviceId,
+      now,
+    });
+    this.writeChange({
+      globalVersion: nextGlobalVersion,
+      opId: body.opId,
+      path: body.file,
+      oldPath: body.oldPath,
+      oldFileVersion: sourceFileVersion,
+      action: "rename",
+      fileVersion: destinationFileVersion,
+      deviceId: body.deviceId,
+      chunksJson,
+      mtime: body.mtime,
+      size: body.size,
+      now,
+    });
+    this.setGlobalVersion(nextGlobalVersion);
+
+    return {
+      success: true as const,
+      fileVersion: destinationFileVersion,
+      globalVersion: nextGlobalVersion,
+    };
+  }
+
+  private recordConflict(
+    body: CommitRequest,
+    current: Record<string, unknown> | undefined,
+    currentVersion: number,
+  ) {
+    this.sql.exec(
+      `INSERT INTO conflicts (conflict_id, path, winning_global_version, losing_device_id, losing_chunks_json, losing_mtime, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      crypto.randomUUID(),
+      body.file,
+      Number(current?.global_version ?? 0),
+      body.deviceId,
+      JSON.stringify(body.chunks),
+      body.mtime,
+      Date.now(),
+    );
+    return { success: false as const, conflict: true as const, currentVersion };
+  }
+
+  private missingChunks(chunks: readonly string[]): string[] {
+    if (chunks.length === 0) return [];
+    const known = new Set<string>();
+    for (let start = 0; start < chunks.length; start += MAX_SQL_BOUND_PARAMETERS) {
+      const batch = chunks.slice(start, start + MAX_SQL_BOUND_PARAMETERS);
+      for (const row of this.sql
+        .exec(`SELECT hash FROM chunks WHERE hash IN (${batch.map(() => "?").join(",")})`, ...batch)
+        .toArray()) {
+        known.add(String(row.hash));
+      }
+    }
+    return chunks.filter((hash) => !known.has(hash));
+  }
+
+  private writeFile(entry: {
+    path: string;
+    chunksJson: string;
+    mtime: number;
+    size: number;
+    fileVersion: number;
+    globalVersion: number;
+    deleted: boolean;
+    deviceId: string;
+    now: number;
+  }) {
+    this.sql.exec(
+      `INSERT OR REPLACE INTO files
+       (path, chunks_json, mtime, size, file_version, global_version, deleted, last_device_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      entry.path,
+      entry.chunksJson,
+      entry.mtime,
+      entry.size,
+      entry.fileVersion,
+      entry.globalVersion,
+      entry.deleted ? 1 : 0,
+      entry.deviceId,
+      entry.now,
+    );
+  }
+
+  private writeChange(entry: {
+    globalVersion: number;
+    opId: string;
+    path: string;
+    oldPath: string | null;
+    oldFileVersion: number | null;
+    action: "put" | "delete" | "rename";
+    fileVersion: number;
+    deviceId: string;
+    chunksJson: string;
+    mtime: number;
+    size: number;
+    now: number;
+  }) {
+    this.sql.exec(
+      `INSERT INTO changes
+       (global_version, op_id, path, old_path, old_file_version, action, file_version, device_id, chunks_json, mtime, size, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      entry.globalVersion,
+      entry.opId,
+      entry.path,
+      entry.oldPath,
+      entry.oldFileVersion,
+      entry.action,
+      entry.fileVersion,
+      entry.deviceId,
+      entry.chunksJson,
+      entry.mtime,
+      entry.size,
+      entry.now,
+    );
+  }
+
+  private setGlobalVersion(globalVersion: number) {
+    this.sql.exec(
+      `INSERT OR REPLACE INTO vault_meta (key, value) VALUES ('globalVersion', ?)`,
+      String(globalVersion),
+    );
+  }
+
+  async changes(body: ChangesQuery) {
+    const { since: sinceVersion, through, limit = 100 } = body;
+    if (!isValidChangesQuery(body)) {
+      throw new Error("Invalid changes query");
+    }
+    const currentVersion = this.getGlobalVersion();
+    const highWatermark = Math.min(through ?? currentVersion, currentVersion);
+    if (highWatermark < sinceVersion) {
+      throw new Error("through must be greater than or equal to since");
+    }
     const changes = this.sql
       .exec(
-        "SELECT * FROM changes WHERE global_version > ? ORDER BY global_version ASC",
+        `SELECT * FROM changes
+         WHERE global_version > ? AND global_version <= ?
+         ORDER BY global_version ASC
+         LIMIT ?`,
         sinceVersion,
+        highWatermark,
+        limit,
       )
       .toArray()
       .map((row) => ({
@@ -670,6 +919,10 @@ export class VaultDO extends DurableObject {
         opId: String(row.op_id),
         path: String(row.path),
         oldPath: row.old_path ? String(row.old_path) : null,
+        oldFileVersion:
+          row.old_file_version === null || row.old_file_version === undefined
+            ? null
+            : Number(row.old_file_version),
         action: String(row.action),
         fileVersion: Number(row.file_version),
         deviceId: String(row.device_id),
@@ -679,7 +932,13 @@ export class VaultDO extends DurableObject {
         timestamp: Number(row.timestamp),
       }));
 
-    return { changes, globalVersion };
+    const nextCursor = changes.at(-1)?.globalVersion ?? sinceVersion;
+    return {
+      changes,
+      nextCursor,
+      highWatermark,
+      hasMore: nextCursor < highWatermark,
+    };
   }
 
   async getFullIndex() {
