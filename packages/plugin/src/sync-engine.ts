@@ -68,6 +68,12 @@ export class SyncEngine {
     return this.lifecycle === "started";
   }
 
+  /** Request a complete coordinator pass, including work already in progress. */
+  syncNow(): Promise<void> {
+    if (this.lifecycle === "stopped") return this.syncPass ?? Promise.resolve();
+    return this.requestSync();
+  }
+
   async start(): Promise<void> {
     if (this.lifecycle === "started") return;
     if (this.lifecycle === "starting" && this.startPromise) return this.startPromise;
@@ -180,7 +186,9 @@ export class SyncEngine {
       return { kind: "local-only", localFiles: localFiles.length };
     }
 
-    const remoteByPath = new Map(remoteIndex.files.map((file) => [file.path, file]));
+    const remoteByPath = new Map<string, (typeof remoteIndex.files)[number]>(
+      remoteIndex.files.map((file) => [file.path, file]),
+    );
     let localOnlyPaths = 0;
     let matchingPaths = 0;
     let conflictingPaths = 0;

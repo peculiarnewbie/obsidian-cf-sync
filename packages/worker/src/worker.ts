@@ -1,5 +1,4 @@
 import { DurableObject } from "cloudflare:workers";
-import type * as cf from "@cloudflare/workers-types";
 import {
   ChunkHash as ChunkHashSchema,
   ChangesQuery as ChangesQuerySchema,
@@ -17,10 +16,10 @@ import {
   type VaultId,
 } from "@obsidian-cf-sync/protocol";
 
-interface Env {
+export interface Env {
   CHUNKS_BUCKET: R2Bucket;
   SYNC_API_KEY: string | { get(): string };
-  VaultDO: cf.DurableObjectNamespace;
+  VaultDO: DurableObjectNamespace<VaultDO>;
 }
 
 interface RpcContext {
@@ -381,7 +380,7 @@ async function handleChunkDownload(
   });
 }
 
-export class VaultDO extends DurableObject {
+export class VaultDO extends DurableObject<Env> {
   private sql!: SqlStorage;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -926,7 +925,7 @@ export class VaultDO extends DurableObject {
         action: String(row.action),
         fileVersion: Number(row.file_version),
         deviceId: String(row.device_id),
-        chunks: JSON.parse(String(row.chunks_json)),
+        chunks: JSON.parse(String(row.chunks_json)) as string[],
         mtime: Number(row.mtime),
         size: Number(row.size),
         timestamp: Number(row.timestamp),
@@ -947,7 +946,7 @@ export class VaultDO extends DurableObject {
       .toArray()
       .map((row) => ({
         path: String(row.path),
-        chunks: JSON.parse(String(row.chunks_json)),
+        chunks: JSON.parse(String(row.chunks_json)) as string[],
         mtime: Number(row.mtime),
         size: Number(row.size),
         fileVersion: Number(row.file_version),

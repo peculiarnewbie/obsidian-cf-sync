@@ -34,6 +34,7 @@ Implemented today:
 - Vault-scoped authorization for chunk downloads, even though R2 deduplicates
   physical chunk bodies globally.
 - Worker integration tests using `@cloudflare/vitest-pool-workers`.
+- Simulated-client E2E tests against local Worker/DO/R2, with controlled delays, offline clients, and lost acknowledgements (`pnpm test:e2e`). Two known recovery bugs are tracked as expected failures.
 - Plugin unit tests for local state isolation and WebSocket lifecycle safety.
 
 Not implemented or incomplete:
@@ -49,8 +50,9 @@ Not implemented or incomplete:
 
 ## Requirements
 
-- Node.js compatible with the package toolchain.
+- Node.js 22.12+ (or 20.19+).
 - `pnpm` 10.33.0.
+- TypeScript 7.0.2, Oxlint 1.82.0, and Oxfmt 0.67.0 are pinned in the workspace.
 - Cloudflare account for deployment.
 - Wrangler authentication if using direct Wrangler commands.
 

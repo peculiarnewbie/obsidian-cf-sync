@@ -5,6 +5,8 @@ import {
   ChangesResponse,
   ChunkUploadResponse,
   CommitResponse,
+  CommitRequest,
+  PrepareRequest,
   DeviceEnrollmentResponse,
   FullIndexResponse,
   PrepareResponse,
@@ -70,37 +72,41 @@ describe("VaultDO", () => {
     const stub = env.VaultDO.getByName("test-vault-lifecycle");
 
     // Register chunks
-    const regResult = await stub.registerChunk({ hash: "chunk-aaa", size: 50 });
+    const regResult = await stub.registerChunk({ hash: "a".repeat(64), size: 50 });
     expect(regResult.success).toBe(true);
 
     // Prepare
-    const prepResult = await stub.prepare({
-      opId: "op-lifecycle-1",
-      action: "put",
-      file: "notes/test.md",
-      chunks: ["chunk-aaa"],
-      mtime: 1000,
-      size: 50,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const prepResult = await stub.prepare(
+      decodeUnknownSync(PrepareRequest)({
+        opId: "op-lifecycle-1",
+        action: "put",
+        file: "notes/test.md",
+        chunks: ["a".repeat(64)],
+        mtime: 1000,
+        size: 50,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
     expect(prepResult.success).toBe(true);
     expect(prepResult.missing).toEqual([]);
 
     // Commit
-    const commitResult = await stub.commit({
-      opId: "op-lifecycle-1",
-      action: "put",
-      file: "notes/test.md",
-      chunks: ["chunk-aaa"],
-      mtime: 1000,
-      size: 50,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const commitResult = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-lifecycle-1",
+        action: "put",
+        file: "notes/test.md",
+        chunks: ["a".repeat(64)],
+        mtime: 1000,
+        size: 50,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
     expect(commitResult.success).toBe(true);
-    expect(commitResult.fileVersion).toBe(1);
-    expect(commitResult.globalVersion).toBe(1);
+    expect(commitResult).toMatchObject({ fileVersion: 1 });
+    expect(commitResult).toMatchObject({ globalVersion: 1 });
 
     // Changes since 0
     const changesResult = await stub.changes({ since: 0 });
@@ -118,43 +124,49 @@ describe("VaultDO", () => {
   it("prepare requires the exact current file version", async () => {
     const stub = env.VaultDO.getByName("test-vault-conflict");
 
-    await stub.registerChunk({ hash: "chunk-bbb", size: 60 });
-    await stub.commit({
-      opId: "op-conflict-1",
-      action: "put",
-      file: "notes/conflict.md",
-      chunks: ["chunk-bbb"],
-      mtime: 1000,
-      size: 60,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    await stub.registerChunk({ hash: "b".repeat(64), size: 60 });
+    await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-conflict-1",
+        action: "put",
+        file: "notes/conflict.md",
+        chunks: ["b".repeat(64)],
+        mtime: 1000,
+        size: 60,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
 
-    const result = await stub.prepare({
-      opId: "op-conflict-2",
-      action: "put",
-      file: "notes/conflict.md",
-      chunks: ["chunk-bbb"],
-      mtime: 2000,
-      size: 60,
-      baseFileVersion: 0,
-      deviceId: "device-2",
-    });
+    const result = await stub.prepare(
+      decodeUnknownSync(PrepareRequest)({
+        opId: "op-conflict-2",
+        action: "put",
+        file: "notes/conflict.md",
+        chunks: ["b".repeat(64)],
+        mtime: 2000,
+        size: 60,
+        baseFileVersion: 0,
+        deviceId: "device-2",
+      }),
+    );
 
     expect(result.success).toBe(false);
     expect(result.conflict).toBe(true);
     expect(result.currentVersion).toBe(1);
 
-    const futureVersion = await stub.prepare({
-      opId: "op-conflict-future-version",
-      action: "put",
-      file: "notes/conflict.md",
-      chunks: ["chunk-bbb"],
-      mtime: 2000,
-      size: 60,
-      baseFileVersion: 2,
-      deviceId: "device-2",
-    });
+    const futureVersion = await stub.prepare(
+      decodeUnknownSync(PrepareRequest)({
+        opId: "op-conflict-future-version",
+        action: "put",
+        file: "notes/conflict.md",
+        chunks: ["b".repeat(64)],
+        mtime: 2000,
+        size: 60,
+        baseFileVersion: 2,
+        deviceId: "device-2",
+      }),
+    );
 
     expect(futureVersion).toMatchObject({
       success: false,
@@ -162,16 +174,18 @@ describe("VaultDO", () => {
       currentVersion: 1,
     });
 
-    const futureCommit = await stub.commit({
-      opId: "op-conflict-future-commit",
-      action: "put",
-      file: "notes/conflict.md",
-      chunks: ["chunk-bbb"],
-      mtime: 2000,
-      size: 60,
-      baseFileVersion: 2,
-      deviceId: "device-2",
-    });
+    const futureCommit = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-conflict-future-commit",
+        action: "put",
+        file: "notes/conflict.md",
+        chunks: ["b".repeat(64)],
+        mtime: 2000,
+        size: 60,
+        baseFileVersion: 2,
+        deviceId: "device-2",
+      }),
+    );
     expect(futureCommit).toMatchObject({
       success: false,
       conflict: true,
@@ -182,30 +196,34 @@ describe("VaultDO", () => {
 
   it("renames atomically with one durable change entry", async () => {
     const stub = env.VaultDO.getByName("test-vault-atomic-rename");
-    await stub.registerChunk({ hash: "chunk-rename", size: 42 });
-    await stub.commit({
-      opId: "rename-source-put",
-      action: "put",
-      file: "notes/old.md",
-      chunks: ["chunk-rename"],
-      mtime: 1000,
-      size: 42,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    await stub.registerChunk({ hash: "c".repeat(64), size: 42 });
+    await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "rename-source-put",
+        action: "put",
+        file: "notes/old.md",
+        chunks: ["c".repeat(64)],
+        mtime: 1000,
+        size: 42,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
 
-    const result = await stub.commit({
-      opId: "rename-atomic-op",
-      action: "rename",
-      file: "notes/new.md",
-      oldPath: "notes/old.md",
-      chunks: ["chunk-rename"],
-      mtime: 2000,
-      size: 42,
-      baseFileVersion: 0,
-      oldBaseFileVersion: 1,
-      deviceId: "device-1",
-    });
+    const result = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "rename-atomic-op",
+        action: "rename",
+        file: "notes/new.md",
+        oldPath: "notes/old.md",
+        chunks: ["c".repeat(64)],
+        mtime: 2000,
+        size: 42,
+        baseFileVersion: 0,
+        oldBaseFileVersion: 1,
+        deviceId: "device-1",
+      }),
+    );
     expect(result).toMatchObject({ success: true, fileVersion: 1, globalVersion: 2 });
 
     const index = await stub.getFullIndex();
@@ -215,7 +233,7 @@ describe("VaultDO", () => {
         path: "notes/new.md",
         fileVersion: 1,
         globalVersion: 2,
-        chunks: ["chunk-rename"],
+        chunks: ["c".repeat(64)],
       }),
     ]);
 
@@ -231,18 +249,20 @@ describe("VaultDO", () => {
       }),
     ]);
 
-    const retry = await stub.commit({
-      opId: "rename-atomic-op",
-      action: "rename",
-      file: "notes/new.md",
-      oldPath: "notes/old.md",
-      chunks: ["chunk-rename"],
-      mtime: 2000,
-      size: 42,
-      baseFileVersion: 0,
-      oldBaseFileVersion: 1,
-      deviceId: "device-1",
-    });
+    const retry = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "rename-atomic-op",
+        action: "rename",
+        file: "notes/new.md",
+        oldPath: "notes/old.md",
+        chunks: ["c".repeat(64)],
+        mtime: 2000,
+        size: 42,
+        baseFileVersion: 0,
+        oldBaseFileVersion: 1,
+        deviceId: "device-1",
+      }),
+    );
     expect(retry).toMatchObject({
       success: true,
       alreadyCommitted: true,
@@ -253,29 +273,33 @@ describe("VaultDO", () => {
 
   it("leaves both paths and the log untouched when a rename conflicts", async () => {
     const stub = env.VaultDO.getByName("test-vault-atomic-rename-conflict");
-    await stub.commit({
-      opId: "rename-conflict-source-put",
-      action: "put",
-      file: "notes/old.md",
-      chunks: [],
-      mtime: 1000,
-      size: 0,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "rename-conflict-source-put",
+        action: "put",
+        file: "notes/old.md",
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
 
-    const result = await stub.commit({
-      opId: "rename-conflict-op",
-      action: "rename",
-      file: "notes/new.md",
-      oldPath: "notes/old.md",
-      chunks: [],
-      mtime: 2000,
-      size: 0,
-      baseFileVersion: 0,
-      oldBaseFileVersion: 0,
-      deviceId: "device-2",
-    });
+    const result = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "rename-conflict-op",
+        action: "rename",
+        file: "notes/new.md",
+        oldPath: "notes/old.md",
+        chunks: [],
+        mtime: 2000,
+        size: 0,
+        baseFileVersion: 0,
+        oldBaseFileVersion: 0,
+        deviceId: "device-2",
+      }),
+    );
     expect(result).toMatchObject({ success: false, conflict: true, currentVersion: 1 });
 
     const index = await stub.getFullIndex();
@@ -287,63 +311,71 @@ describe("VaultDO", () => {
   it("commit rejects unknown chunks", async () => {
     const stub = env.VaultDO.getByName("test-vault-unknown");
 
-    const result = await stub.commit({
-      opId: "op-unknown-1",
-      action: "put",
-      file: "notes/test.md",
-      chunks: ["nonexistent-hash"],
-      mtime: 1000,
-      size: 50,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const result = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-unknown-1",
+        action: "put",
+        file: "notes/test.md",
+        chunks: ["f".repeat(64)],
+        mtime: 1000,
+        size: 50,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe("CHUNK_NOT_REGISTERED");
+    expect(result).toMatchObject({ code: "CHUNK_NOT_REGISTERED" });
   });
 
   it("supports empty files", async () => {
     const stub = env.VaultDO.getByName("test-vault-empty");
 
-    const prepResult = await stub.prepare({
-      opId: "op-empty-1",
-      action: "put",
-      file: "notes/empty.md",
-      chunks: [],
-      mtime: 1000,
-      size: 0,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const prepResult = await stub.prepare(
+      decodeUnknownSync(PrepareRequest)({
+        opId: "op-empty-1",
+        action: "put",
+        file: "notes/empty.md",
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
     expect(prepResult.success).toBe(true);
     expect(prepResult.missing).toEqual([]);
 
-    const commitResult = await stub.commit({
-      opId: "op-empty-1",
-      action: "put",
-      file: "notes/empty.md",
-      chunks: [],
-      mtime: 1000,
-      size: 0,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const commitResult = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-empty-1",
+        action: "put",
+        file: "notes/empty.md",
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
     expect(commitResult.success).toBe(true);
   });
 
   it("commits delete tombstones", async () => {
     const stub = env.VaultDO.getByName("test-vault-delete");
 
-    const result = await stub.commit({
-      opId: "op-delete-1",
-      action: "delete",
-      file: "notes/deleted.md",
-      chunks: [],
-      mtime: 1000,
-      size: 0,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    const result = await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "op-delete-1",
+        action: "delete",
+        file: "notes/deleted.md",
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
     expect(result.success).toBe(true);
 
     const changesResult = await stub.changes({ since: 0 });
@@ -354,16 +386,18 @@ describe("VaultDO", () => {
     const stub = env.VaultDO.getByName("test-vault-change-pages");
 
     for (const suffix of ["one", "two", "three"]) {
-      await stub.commit({
-        opId: `page-${suffix}`,
-        action: "delete",
-        file: `notes/${suffix}.md`,
-        chunks: [],
-        mtime: 1000,
-        size: 0,
-        baseFileVersion: 0,
-        deviceId: "device-1",
-      });
+      await stub.commit(
+        decodeUnknownSync(CommitRequest)({
+          opId: `page-${suffix}`,
+          action: "delete",
+          file: `notes/${suffix}.md`,
+          chunks: [],
+          mtime: 1000,
+          size: 0,
+          baseFileVersion: 0,
+          deviceId: "device-1",
+        }),
+      );
     }
 
     const firstPage = await stub.changes({ since: 0, limit: 2 });
@@ -372,16 +406,18 @@ describe("VaultDO", () => {
     expect(firstPage.highWatermark).toBe(3);
     expect(firstPage.hasMore).toBe(true);
 
-    await stub.commit({
-      opId: "page-four",
-      action: "delete",
-      file: "notes/four.md",
-      chunks: [],
-      mtime: 1000,
-      size: 0,
-      baseFileVersion: 0,
-      deviceId: "device-1",
-    });
+    await stub.commit(
+      decodeUnknownSync(CommitRequest)({
+        opId: "page-four",
+        action: "delete",
+        file: "notes/four.md",
+        chunks: [],
+        mtime: 1000,
+        size: 0,
+        baseFileVersion: 0,
+        deviceId: "device-1",
+      }),
+    );
 
     const secondPage = await stub.changes({
       since: firstPage.nextCursor,
@@ -519,7 +555,7 @@ describe("Worker sync HTTP routes", () => {
     const vaultId = "http-bad-chunk-vault";
     const deviceId = "http-device-bad-chunk";
     const token = await enrollDevice(vaultId, deviceId);
-    const data = new TextEncoder().encode("actual chunk body").buffer;
+    const data = new Uint8Array(new TextEncoder().encode("actual chunk body")).buffer;
 
     const resp = await worker.fetch(
       request(
@@ -580,8 +616,13 @@ describe("Worker sync HTTP routes", () => {
       workerEnv(),
     );
     expect(batchedManifestResp.status).toBe(200);
-    const batchedManifestResult = await batchedManifestResp.json();
+    const batchedManifestResult = decodeUnknownSync(PrepareResponse)(
+      await batchedManifestResp.json(),
+    );
     expect(batchedManifestResult).toMatchObject({ success: true });
+    if (!batchedManifestResult.success || !("missing" in batchedManifestResult)) {
+      throw new Error("Expected a prepared manifest with missing chunks");
+    }
     expect(batchedManifestResult.missing).toHaveLength(101);
 
     const tooManyChunks = {
@@ -669,7 +710,7 @@ describe("Worker sync HTTP routes", () => {
     const vaultId = "http-lifecycle-vault";
     const deviceId = "http-device-1";
     const token = await enrollDevice(vaultId, deviceId);
-    const data = new TextEncoder().encode("hello from http").buffer;
+    const data = new Uint8Array(new TextEncoder().encode("hello from http")).buffer;
     const hash = await sha256Hex(data);
 
     const uploadResp = await worker.fetch(
@@ -745,7 +786,7 @@ describe("Worker sync HTTP routes", () => {
     const deviceB = "http-chunk-auth-device-b";
     const tokenA = await enrollDevice(vaultA, deviceA);
     const tokenB = await enrollDevice(vaultB, deviceB);
-    const data = new TextEncoder().encode("vault-scoped chunk").buffer;
+    const data = new Uint8Array(new TextEncoder().encode("vault-scoped chunk")).buffer;
     const hash = await sha256Hex(data);
 
     const upload = await worker.fetch(

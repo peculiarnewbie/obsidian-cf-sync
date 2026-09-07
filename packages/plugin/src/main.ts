@@ -3,11 +3,11 @@ import {
   DeviceEnrollmentResponse as DeviceEnrollmentResponseSchema,
   decodeUnknownSync,
 } from "@obsidian-cf-sync/protocol";
-import { DEFAULT_SETTINGS, PluginSettings, SyncSettingTab } from "./settings";
+import { DEFAULT_SETTINGS, type PluginSettings, SyncSettingTab } from "./settings";
 import { SyncEngine } from "./sync-engine";
 
 export default class ObsidianCfSyncPlugin extends Plugin {
-  settings: PluginSettings;
+  settings: PluginSettings = { ...DEFAULT_SETTINGS };
   syncEngine: SyncEngine | null = null;
 
   async onload(): Promise<void> {

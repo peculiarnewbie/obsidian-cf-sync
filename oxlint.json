@@ -1,3 +1,4 @@
 {
-  "ignorePatterns": [".references/**"]
+  "ignorePatterns": [".references/**", "**/dist/**", ".alchemy/**", ".wrangler/**"],
+  "$schema": "./node_modules/oxlint/configuration_schema.json"
 }

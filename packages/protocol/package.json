@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "effect": "4.0.0-beta.70"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

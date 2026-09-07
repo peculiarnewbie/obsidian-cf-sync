@@ -2,15 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConnectionManager } from "../connection";
 
 class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 3;
+
   readyState = FakeWebSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
-
-  static readonly CONNECTING = 0;
-  static readonly OPEN = 1;
-  static readonly CLOSED = 3;
 
   close(): void {
     this.readyState = FakeWebSocket.CLOSED;

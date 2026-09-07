@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "sortImports": false,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "**/dist/**",
+    ".references/**",
+    ".alchemy/**",
+    ".wrangler/**",
+    "pnpm-lock.yaml",
+    "skills-lock.json"
+  ]
+}
