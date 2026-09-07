@@ -50,7 +50,7 @@ The Durable Object handles:
   Object SQLite transaction.
 - Global version assignment.
 - Change log queries.
-- Full active-file index queries.
+- Full active-file index queries with tombstones, plus individual file-state lookup.
 - WebSocket accept, ping/pong, and change broadcasts.
 
 ### `packages/plugin`
@@ -91,7 +91,7 @@ Device credentials are stored in Obsidian plugin settings:
 
 - `deviceId`: generated locally on first plugin load.
 - `deviceToken`: returned by `/devices/enroll` and used for sync authentication.
-- `apiKey`: bootstrap key used only to pair/re-pair the device.
+- `apiKey`: bootstrap key entered for pairing and cleared after a successful enrollment.
 
 ## Enrollment Flow
 
@@ -109,8 +109,9 @@ On a new local sync identity, the plugin fetches the remote index before it
 installs file listeners or writes to the vault.
 
 - Empty local + empty remote: records the current cursor and starts normally.
-- Empty local + remote files: imports the indexed remote files, then records
-  the index cursor.
+- Empty local + remote files: persists the index snapshot, resumes imports from
+  that snapshot after interruptions, then records the index cursor. Matching
+  files written before their metadata acknowledgement can be adopted on resume.
 - Local files + empty remote: snapshots the local files into the durable
   journal before recording the cursor.
 - Local files + remote files: hashes shared local paths, logs a count of
@@ -130,7 +131,9 @@ For a file write:
 2. It snapshots a put's fixed 256 KB chunk bodies into IndexedDB, then stores a
    durable pending operation before attempting network work.
 3. The serialized coordinator reconciles periodic scans with that journal.
-4. It calls `POST /sync/prepare` with the operation's path, chunk hashes, exact
+4. It durably marks the operation attempted before sending it. Attempted
+   payloads are immutable; later edits/deletes/renames become ordered successors.
+   It calls `POST /sync/prepare` with the operation's path, chunk hashes, exact
    base file version, and device ID. A rename includes exact source and
    destination versions.
 5. The Worker validates the device token against the vault Durable Object.
@@ -158,4 +161,18 @@ The Durable Object uses per-file monotonic `fileVersion` values. A client must
 commit with the exact `baseFileVersion`; either stale or future values return a
 conflict response. On commit conflicts, it also stores a row in `conflicts`.
 
-The plugin currently responds by creating a local conflict copy and pulling the server version. This is intentionally simple and needs product polish before production use.
+The plugin responds by creating a local conflict copy and looking up the
+canonical path state (including tombstones). Lookup errors leave the operation
+pending. Protocol errors are retried/reported rather than classified as conflicts.
+This still needs product polish before production use.
+
+The engine snapshots its configuration. Settings changes shut down and drain
+the previous engine before creating another; disabling sync stops it. Startup
+waits for layout readiness before inspecting the vault. Remote application
+checks cancellation before filesystem mutations and skips superseded versions.
+An echoed pending operation acknowledges its snapshot without replacing newer
+local edits. Configuration paths are excluded in both directions.
+
+Periodic reconciliation compares file size and modification time before
+reading unchanged bodies, with a full hash audit every five minutes while
+active. This reduces idle work while retaining a fallback for missed events.

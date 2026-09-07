@@ -1,3 +1,5 @@
+import type { FullIndexResponse } from "@obsidian-cf-sync/protocol";
+
 const DB_NAME_PREFIX = "obsidian-cf-sync";
 const DB_VERSION = 1;
 
@@ -51,6 +53,8 @@ export interface PendingOp {
   mtime: number;
   size: number;
   createdAt: number;
+  /** Once sent, the operation and its ID are immutable, even after a lost response. */
+  attempted?: boolean;
 }
 
 function openDB(name: string): Promise<IDBDatabase> {
@@ -123,12 +127,25 @@ function txReplacePendingOp(db: IDBDatabase, op: PendingOp): Promise<void> {
     const request = store.getAll();
     request.onsuccess = () => {
       const affectedPaths = new Set(pendingOpPaths(op));
-      for (const existing of request.result as PendingOp[]) {
-        if (pendingOpPaths(existing).some((path) => affectedPaths.has(path))) {
+      const existingOps = request.result as PendingOp[];
+      for (const existing of existingOps) {
+        if (existing.attempted && existing.opId === op.opId) {
+          tx.abort();
+          return;
+        }
+        if (
+          !existing.attempted &&
+          pendingOpPaths(existing).some((path) => affectedPaths.has(path))
+        ) {
           store.delete(existing.opId);
         }
       }
-      store.put(op);
+      // Preserve a deterministic dependency order even for events in the same millisecond.
+      const createdAt = Math.max(
+        op.createdAt,
+        ...existingOps.map((existing) => existing.createdAt + 1),
+      );
+      store.put({ ...op, createdAt });
     };
     request.onerror = () => reject(request.error);
     tx.oncomplete = () => resolve();
@@ -186,11 +203,42 @@ export class LocalState {
 
   async getPendingOpAffectingPath(path: string): Promise<PendingOp | undefined> {
     const ops = await this.getPendingOps();
-    return ops.find((op) => pendingOpPaths(op).includes(path));
+    return ops.findLast((op) => pendingOpPaths(op).includes(path));
   }
 
   async replacePendingOp(op: PendingOp): Promise<void> {
     return txReplacePendingOp(this.db, op);
+  }
+
+  async beginPendingAttempt(opId: string): Promise<PendingOp | undefined> {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction("pendingOps", "readwrite");
+      const store = tx.objectStore("pendingOps");
+      const request = store.get(opId);
+      let op: PendingOp | undefined;
+      request.onsuccess = () => {
+        const current = request.result as PendingOp | undefined;
+        if (current) {
+          op = { ...current, attempted: true };
+          store.put(op);
+        }
+      };
+      tx.oncomplete = () => resolve(op);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  async getBootstrap(): Promise<FullIndexResponse | undefined> {
+    return txGet<FullIndexResponse>(this.db, "syncState", "bootstrap");
+  }
+
+  async putBootstrap(index: FullIndexResponse): Promise<void> {
+    return txPut(this.db, "syncState", { ...index, key: "bootstrap" });
+  }
+
+  async clearBootstrap(): Promise<void> {
+    return txDelete(this.db, "syncState", "bootstrap");
   }
 
   async removePendingOp(opId: string): Promise<void> {

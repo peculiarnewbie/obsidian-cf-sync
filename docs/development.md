@@ -129,15 +129,14 @@ Passing scenarios cover:
 - Concurrent edits with a delayed commit, preserving both versions.
 - An old change-page response arriving after a newer server commit.
 
-Two desired recovery contracts are explicitly marked `it.fails`:
-
-- An edit following an ambiguously committed rename must survive retry.
-- A partially imported remote vault must resume after interruption.
-
-These are known bugs, not passing recovery guarantees. Vitest reports them as
-expected failures; fixing one makes the test unexpectedly pass, requiring
-removal of `.fails` alongside the fix. Keep this distinction when reporting
-suite results.
+Additional recovery and safety scenarios cover edits, deletions, and rename
+chains following ambiguous commits; interrupted bootstrap and shutdown;
+fresh-client tombstone reuse; corrupt chunk rejection; excluded incoming
+configuration paths; plugin enable/disable; and idle file-read avoidance.
+The original two expected failures are now ordinary passing regression tests.
+Worker integration tests separately exercise a real WebSocket being closed
+on device revocation, changed-payload operation-ID reuse, canonical paths,
+CORS, and streaming body limits.
 
 WebSocket delivery is deliberately unavailable, exercising HTTP catch-up
 without notifications. Tests request coordinator passes explicitly rather
@@ -161,7 +160,7 @@ Watch plugin builds:
 pnpm dev:plugin
 ```
 
-Build output goes to `packages/plugin/dist`. The Vite build copies `manifest.json` and `styles.css` into that folder alongside `main.js`, so `dist` can be copied directly into an Obsidian vault plugin directory.
+Build output goes to `packages/plugin/dist`. Production JavaScript is minified; source maps are separate files rather than embedded in `main.js`. The Vite build copies `manifest.json` and `styles.css` into that folder alongside `main.js`, so `dist` can be copied directly into an Obsidian vault plugin directory.
 
 Manual install into a vault:
 
@@ -263,7 +262,6 @@ curl -H "Authorization: Bearer $DEVICE_TOKEN" -H "X-Vault-Id: $VAULT_ID" -H "X-D
 
 ## Known Development Gaps
 
-- Fix the two expected-failure E2E recovery contracts.
 - Extend E2E coverage to actual WebSocket delivery, pagination, and process interruption during filesystem/IndexedDB writes.
 - Add encryption before any production data use.
 - Add a better approval UX for device enrollment and support token rotation.

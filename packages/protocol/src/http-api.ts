@@ -10,6 +10,9 @@ import {
   DeviceEnrollmentRequest,
   DeviceEnrollmentResponse,
   FullIndexResponse,
+  FileStateResponse,
+  FilePath,
+  Schema,
   PrepareRequest,
   PrepareResponse,
   RevokeDeviceRequest,
@@ -33,6 +36,11 @@ export const SyncApi = HttpApi.make("ObsidianCfSyncApi").add(
       headers: DeviceAuthHeaders,
       query: ChangesQuery,
       success: ChangesResponse,
+    }),
+    HttpApiEndpoint.get("file", "/sync/file", {
+      headers: DeviceAuthHeaders,
+      query: Schema.Struct({ path: FilePath }),
+      success: FileStateResponse,
     }),
     HttpApiEndpoint.get("index", "/sync/index", {
       headers: DeviceAuthHeaders,

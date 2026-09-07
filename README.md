@@ -30,11 +30,14 @@ Implemented today:
 - Device enrollment with per-device sync tokens.
 - Device revocation through the bootstrap API key.
 - Exact file-version compare-and-swap for every mutation.
+- Immutable attempted operations, ordered successors, and server-side rejection of operation-ID reuse with a changed payload.
+- Resumable remote imports, tombstone-aware fresh clients, and verified chunk downloads.
+- Immediate disable/reconfiguration, receive-side configuration-directory exclusion, and device revocation that closes existing sockets.
 - Atomic, idempotent rename operations in one Durable Object transaction.
 - Vault-scoped authorization for chunk downloads, even though R2 deduplicates
   physical chunk bodies globally.
 - Worker integration tests using `@cloudflare/vitest-pool-workers`.
-- Simulated-client E2E tests against local Worker/DO/R2, with controlled delays, offline clients, and lost acknowledgements (`pnpm test:e2e`). Two known recovery bugs are tracked as expected failures.
+- Simulated-client E2E tests against local Worker/DO/R2, with controlled delays, offline clients, and lost acknowledgements (`pnpm test:e2e`). Recovery scenarios include interrupted bootstrap, lost acknowledgements, and subsequent edits.
 - Plugin unit tests for local state isolation and WebSocket lifecycle safety.
 
 Not implemented or incomplete:

@@ -16,7 +16,12 @@ Vault identity:
 - Preferred: `X-Vault-Id: <vaultId>`.
 - WebSocket fallback: `?vaultId=<vaultId>`.
 
-Vault IDs must match `^[a-zA-Z0-9_-]{1,128}$`.
+Vault IDs must match `^[a-zA-Z0-9_-]{1,128}$`. File paths are canonical relative
+paths (up to 2,048 characters): empty/dot/traversal segments, backslashes,
+colons, and control characters are rejected. Device IDs are limited to 128
+characters. JSON bodies are bounded to 512 KiB while streaming; malformed
+JSON returns `400 INVALID_JSON`. CORS headers are returned on success and
+error responses, as well as preflight.
 
 ## `POST /devices/enroll`
 
@@ -42,11 +47,11 @@ Response:
 }
 ```
 
-The Worker returns the raw device token once. The Durable Object stores only a SHA-256 hash.
+The Worker returns the raw device token once. The Durable Object stores only a SHA-256 hash. Re-enrollment rotates the token and closes that device's existing WebSockets.
 
 ## `POST /devices/revoke`
 
-Revokes a device. Requires bootstrap authentication with `SYNC_API_KEY`.
+Revokes a device and closes its existing WebSockets with code 1008. Requires bootstrap authentication with `SYNC_API_KEY`.
 
 Request:
 
@@ -146,6 +151,11 @@ Conflict response:
 }
 ```
 
+An operation ID is bound to its original payload and device. Reusing a
+committed ID with changed content, paths, versions, timestamps, or device ID
+returns `{ "success": false, "code": "OP_ID_REUSED", "error": "..." }` from
+both prepare and commit. Such errors must not be treated as version conflicts.
+
 ## `PUT /sync/chunk/:hash`
 
 Uploads a raw chunk body. The Worker computes SHA-256 over the body and rejects uploads where the computed hash does not match `:hash`. Chunk bodies may not exceed 512 KiB.
@@ -232,7 +242,10 @@ Response:
 
 ## `GET /sync/index`
 
-Returns the current non-deleted file index.
+Returns the current non-deleted file index plus a `tombstones` array. Each
+tombstone contains `path`, `mtime`, `fileVersion`, and `globalVersion`. A fresh
+client must retain these versions before acknowledging the snapshot cursor,
+so recreating a deleted path uses the correct compare-and-swap version.
 
 Response:
 
@@ -251,6 +264,16 @@ Response:
   "globalVersion": 1
 }
 ```
+
+## `GET /sync/file?path=<encoded-path>`
+
+Returns `{ "file": null }` for a path that never existed, or `{ "file": { ... } }`
+with the file-index fields and a `deleted` boolean. Deleted entries carry an
+empty chunk list and their current tombstone version. Conflict recovery uses
+this endpoint rather than downloading the full index. A failed lookup must
+leave the pending operation available for retry.
+
+Deploy the updated Worker before updating clients that use this endpoint.
 
 ## `WS /sync/ws`
 
@@ -286,3 +309,7 @@ Broadcast message after successful commits:
   "deviceId": "device-abc"
 }
 ```
+
+Ping/pong uses the Durable Object auto-response API to avoid waking a
+hibernating object. Only `file_changed` notifications wake the plugin's sync
+coordinator; pong messages do not initiate replication.

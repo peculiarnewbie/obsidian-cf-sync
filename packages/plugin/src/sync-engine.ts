@@ -6,6 +6,8 @@ import {
   ChangesResponse as ChangesResponseSchema,
   CommitResponse as CommitResponseSchema,
   FullIndexResponse as FullIndexResponseSchema,
+  FileStateResponse as FileStateResponseSchema,
+  FilePath as FilePathSchema,
   PrepareResponse as PrepareResponseSchema,
   Schema,
   decodeUnknownSync,
@@ -47,10 +49,12 @@ export class SyncEngine {
   private eventRefs: EventRef[] = [];
   private vaultReady = false;
   private applyingRemote = false;
+  private scannedFiles = new Map<string, { mtime: number; size: number }>();
+  private lastAuditAt = 0;
 
   constructor(app: App, settings: PluginSettings) {
     this.app = app;
-    this.settings = settings;
+    this.settings = { ...settings };
     this.localState = new LocalState({
       workerUrl: settings.workerUrl,
       vaultId: settings.vaultId,
@@ -97,7 +101,6 @@ export class SyncEngine {
     this.syncRequested = false;
     this.vaultReady = false;
     this.abortController?.abort();
-    this.abortController = null;
     this.connection.disconnect();
     if (this.syncTimer) {
       clearTimeout(this.syncTimer);
@@ -113,7 +116,28 @@ export class SyncEngine {
     this.eventRefs = [];
   }
 
+  async shutdown(): Promise<void> {
+    this.stop();
+    await this.startPromise;
+    await this.syncPass;
+    await this.journalPass;
+  }
+
+  private async waitForLayout(signal: AbortSignal): Promise<void> {
+    if (this.app.workspace.layoutReady || signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        signal.removeEventListener("abort", done);
+        resolve();
+      };
+      signal.addEventListener("abort", done, { once: true });
+      this.app.workspace.onLayoutReady(done);
+    });
+  }
+
   private async startInternal(abortController: AbortController, generation: number): Promise<void> {
+    await this.waitForLayout(abortController.signal);
+    if (!this.isCurrentStart(abortController, generation)) return;
     await this.localState.init();
     if (!this.isCurrentStart(abortController, generation)) return;
 
@@ -122,6 +146,7 @@ export class SyncEngine {
       try {
         bootstrap = await this.bootstrapFreshScope();
       } catch (error) {
+        if (!this.isCurrentStart(abortController, generation)) return;
         this.stopAfterFailedBootstrap("Unable to inspect the initial sync state", error);
         return;
       }
@@ -136,8 +161,8 @@ export class SyncEngine {
     if (!this.isCurrentStart(abortController, generation)) return;
 
     if (!this.connectionHandlersInstalled) {
-      this.connection.onMessage(() => {
-        void this.requestSync();
+      this.connection.onMessage((message) => {
+        if (message.type === "file_changed") void this.requestSync();
       });
       this.connection.onConnect(() => {
         void this.requestSync();
@@ -152,7 +177,15 @@ export class SyncEngine {
 
   private async bootstrapFreshScope(): Promise<BootstrapResult> {
     const localFiles = this.app.vault.getFiles().filter((file) => this.isSyncablePath(file.path));
-    const remoteIndex = await this.apiCall(FullIndexResponseSchema, "GET", "/sync/index");
+    const savedBootstrap = await this.localState.getBootstrap();
+    const remoteIndex =
+      savedBootstrap ?? (await this.apiCall(FullIndexResponseSchema, "GET", "/sync/index"));
+
+    for (const entry of remoteIndex.tombstones ?? []) {
+      if (this.isSyncablePath(entry.path)) {
+        await this.localState.putFile({ ...entry, chunks: [], deleted: true });
+      }
+    }
 
     if (localFiles.length === 0 && remoteIndex.files.length === 0) {
       await this.localState.updateSyncState({
@@ -162,14 +195,34 @@ export class SyncEngine {
       return { kind: "empty" };
     }
 
-    if (localFiles.length === 0) {
+    if (savedBootstrap || localFiles.length === 0) {
+      if (!savedBootstrap) await this.localState.putBootstrap(remoteIndex);
       for (const fileEntry of [...remoteIndex.files].sort((a, b) => a.path.localeCompare(b.path))) {
+        if (!this.isSyncablePath(fileEntry.path)) continue;
+        const existing = this.app.vault.getAbstractFileByPath(fileEntry.path);
+        if (
+          savedBootstrap &&
+          existing instanceof TFile &&
+          !(await this.localState.getFile(fileEntry.path))
+        ) {
+          // Recover a crash between the filesystem write and its IndexedDB acknowledgement.
+          const hashes = (await this.chunkData(await this.app.vault.readBinary(existing))).map(
+            (chunk) => chunk.hash,
+          );
+          if (!this.arraysEqual(hashes, Array.from(fileEntry.chunks))) {
+            throw new Error(
+              `Untracked local content differs from the saved import: ${fileEntry.path}`,
+            );
+          }
+          await this.localState.putFile({ ...fileEntry, chunks: hashes, deleted: false });
+        }
         await this.applyFileEntry(fileEntry);
       }
       await this.localState.updateSyncState({
         globalVersion: remoteIndex.globalVersion,
         lastFullSync: Date.now(),
       });
+      await this.localState.clearBootstrap();
       return { kind: "remote-only", remoteFiles: remoteIndex.files.length };
     }
 
@@ -220,7 +273,6 @@ export class SyncEngine {
   private stopAfterFailedBootstrap(message: string, details: unknown): void {
     this.lifecycle = "stopped";
     this.abortController?.abort();
-    this.abortController = null;
     this.connection.disconnect();
     this.logError(message, details);
     new Notice(message);
@@ -312,9 +364,17 @@ export class SyncEngine {
   }
 
   private async queuePut(file: TFile): Promise<void> {
+    const observed = { path: file.path, mtime: file.stat.mtime, size: file.stat.size };
     const content = await this.app.vault.readBinary(file);
     const chunks = await this.chunkData(content);
     const chunkHashes = chunks.map((chunk) => chunk.hash);
+    if (
+      file.path === observed.path &&
+      file.stat.mtime === observed.mtime &&
+      file.stat.size === observed.size
+    ) {
+      this.scannedFiles.set(observed.path, observed);
+    }
     const localEntry = await this.localState.getFile(file.path);
     const existingOp = await this.localState.getPendingOpAffectingPath(file.path);
     const hasSameSnapshot =
@@ -329,9 +389,10 @@ export class SyncEngine {
 
     await this.cachePendingChunks(chunks);
 
-    if (existingOp?.action === "rename" && existingOp.path === file.path) {
+    if (existingOp?.action === "rename" && !existingOp.attempted && existingOp.path === file.path) {
       await this.localState.replacePendingOp({
         ...existingOp,
+        opId: crypto.randomUUID(),
         chunks: chunkHashes,
         mtime: file.stat.mtime,
         size: file.stat.size,
@@ -345,7 +406,7 @@ export class SyncEngine {
       path: file.path,
       baseFileVersion:
         existingOp && existingOp.path === file.path
-          ? existingOp.baseFileVersion
+          ? this.pendingBaseVersion(existingOp, file.path)
           : (localEntry?.fileVersion ?? 0),
       chunks: chunkHashes,
       mtime: file.stat.mtime,
@@ -361,7 +422,12 @@ export class SyncEngine {
     const oldEntry = await this.localState.getFile(oldPath);
     const oldPendingOp = await this.localState.getPendingOpAffectingPath(oldPath);
 
-    if (!oldEntry && oldPendingOp?.action === "put" && oldPendingOp.path === oldPath) {
+    if (
+      !oldEntry &&
+      !oldPendingOp?.attempted &&
+      oldPendingOp?.action === "put" &&
+      oldPendingOp.path === oldPath
+    ) {
       await this.localState.removePendingOp(oldPendingOp.opId);
       await this.queuePut(file);
       return;
@@ -369,9 +435,15 @@ export class SyncEngine {
 
     await this.cachePendingChunks(chunks);
 
-    if (!oldEntry && oldPendingOp?.action === "rename" && oldPendingOp.path === oldPath) {
+    if (
+      !oldEntry &&
+      !oldPendingOp?.attempted &&
+      oldPendingOp?.action === "rename" &&
+      oldPendingOp.path === oldPath
+    ) {
       await this.localState.replacePendingOp({
         ...oldPendingOp,
+        opId: crypto.randomUUID(),
         path: file.path,
         chunks: chunkHashes,
         mtime: file.stat.mtime,
@@ -387,7 +459,9 @@ export class SyncEngine {
       path: file.path,
       oldPath,
       baseFileVersion: destinationEntry?.fileVersion ?? 0,
-      oldBaseFileVersion: oldEntry?.fileVersion ?? 0,
+      oldBaseFileVersion: oldPendingOp?.attempted
+        ? this.pendingBaseVersion(oldPendingOp, oldPath)
+        : (oldEntry?.fileVersion ?? 0),
       chunks: chunkHashes,
       mtime: file.stat.mtime,
       size: file.stat.size,
@@ -399,12 +473,22 @@ export class SyncEngine {
     const localEntry = await this.localState.getFile(path);
     const existingOp = await this.localState.getPendingOpAffectingPath(path);
 
-    if (!localEntry && existingOp?.action === "put" && existingOp.path === path) {
+    if (
+      !localEntry &&
+      !existingOp?.attempted &&
+      existingOp?.action === "put" &&
+      existingOp.path === path
+    ) {
       await this.localState.removePendingOp(existingOp.opId);
       return;
     }
 
-    if (!localEntry && existingOp?.action === "rename" && existingOp.path === path) {
+    if (
+      !localEntry &&
+      !existingOp?.attempted &&
+      existingOp?.action === "rename" &&
+      existingOp.path === path
+    ) {
       await this.localState.replacePendingOp({
         opId: crypto.randomUUID(),
         action: "delete",
@@ -415,7 +499,6 @@ export class SyncEngine {
         size: 0,
         createdAt: Date.now(),
       });
-      await this.localState.deleteFile(existingOp.oldPath ?? path);
       return;
     }
 
@@ -425,13 +508,19 @@ export class SyncEngine {
       opId: crypto.randomUUID(),
       action: "delete",
       path,
-      baseFileVersion: localEntry?.fileVersion ?? existingOp?.baseFileVersion ?? 0,
+      baseFileVersion: existingOp?.attempted
+        ? this.pendingBaseVersion(existingOp, path)
+        : (localEntry?.fileVersion ?? existingOp?.baseFileVersion ?? 0),
       chunks: [],
       mtime: Date.now(),
       size: 0,
       createdAt: Date.now(),
     });
-    await this.localState.deleteFile(path);
+  }
+
+  private pendingBaseVersion(op: PendingOp, path: string): number {
+    const base = op.oldPath === path ? (op.oldBaseFileVersion ?? 0) : op.baseFileVersion;
+    return base + (op.attempted ? 1 : 0);
   }
 
   private async cachePendingChunks(
@@ -445,6 +534,7 @@ export class SyncEngine {
   }
 
   private debounceSync(): void {
+    if (this.lifecycle !== "started") return;
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.syncTimer = setTimeout(() => {
       this.syncTimer = null;
@@ -498,8 +588,21 @@ export class SyncEngine {
     await this.queueJournal(async () => {
       const files = this.app.vault.getFiles().filter((file) => this.isSyncablePath(file.path));
       const currentPaths = new Set(files.map((file) => file.path));
+      const audit = Date.now() - this.lastAuditAt >= 5 * 60_000;
       for (const file of files) {
-        await this.queuePut(file);
+        const scanned = this.scannedFiles.get(file.path);
+        if (
+          audit ||
+          !scanned ||
+          scanned.mtime !== file.stat.mtime ||
+          scanned.size !== file.stat.size
+        ) {
+          await this.queuePut(file);
+        }
+      }
+      if (audit) this.lastAuditAt = Date.now();
+      for (const path of this.scannedFiles.keys()) {
+        if (!currentPaths.has(path)) this.scannedFiles.delete(path);
       }
 
       const pendingOps = await this.localState.getPendingOps();
@@ -511,10 +614,11 @@ export class SyncEngine {
         ) {
           continue;
         }
-        const pendingOp = pendingOps.find(
+        const pendingOp = pendingOps.findLast(
           (op) => op.path === localEntry.path || op.oldPath === localEntry.path,
         );
         if (pendingOp?.action === "rename" && pendingOp.oldPath === localEntry.path) continue;
+        if (pendingOp?.action === "delete") continue;
         await this.queueDelete(localEntry.path);
       }
     });
@@ -581,24 +685,42 @@ export class SyncEngine {
   }
 
   private async pullFile(path: string): Promise<void> {
-    try {
-      const indexResp = await this.apiCall(FullIndexResponseSchema, "GET", "/sync/index");
-      const fileEntry = indexResp.files.find((f: { path: string }) => f.path === path);
-      if (!fileEntry) return;
-
-      await this.applyFileEntry(fileEntry);
-    } catch (e) {
-      console.error(`Failed to pull ${path}:`, e);
-    }
+    const response = await this.apiCall(
+      FileStateResponseSchema,
+      "GET",
+      `/sync/file?${new URLSearchParams({ path })}`,
+    );
+    if (!response.file)
+      throw new Error(`No canonical state returned for conflicting path: ${path}`);
+    if (response.file.deleted) await this.applyDelete(response.file);
+    else await this.applyFileEntry(response.file);
   }
 
   private async applyFileEntry(fileEntry: {
     path: string;
+    opId?: string;
     chunks: readonly string[];
     mtime: number;
     fileVersion: number;
     globalVersion: number;
   }): Promise<void> {
+    if (!this.isSyncablePath(fileEntry.path)) return;
+    const known = await this.localState.getFile(fileEntry.path);
+    if (known && known.globalVersion > fileEntry.globalVersion) return;
+    if (
+      fileEntry.opId &&
+      (await this.localState.getPendingOps()).some(
+        (op) => op.opId === fileEntry.opId && op.attempted,
+      )
+    ) {
+      // A lost acknowledgement must not replay our snapshot over later local edits.
+      await this.localState.putFile({
+        ...fileEntry,
+        chunks: Array.from(fileEntry.chunks),
+        deleted: false,
+      });
+      return;
+    }
     const chunks: ArrayBuffer[] = [];
     for (const hash of fileEntry.chunks) {
       let data = await this.localState.getChunkData(hash);
@@ -617,6 +739,7 @@ export class SyncEngine {
       offset += chunk.byteLength;
     }
 
+    this.abortController?.signal.throwIfAborted();
     this.applyingRemote = true;
     try {
       const existing = this.app.vault.getAbstractFileByPath(fileEntry.path);
@@ -625,9 +748,11 @@ export class SyncEngine {
         if (this.app.vault.getAbstractFileByPath(fileEntry.path) !== existing) {
           throw new Error(`Local file changed while applying remote update: ${fileEntry.path}`);
         }
+        this.abortController?.signal.throwIfAborted();
         await this.app.vault.modifyBinary(existing, assembled.buffer);
       } else {
         await this.ensureFolder(fileEntry.path);
+        this.abortController?.signal.throwIfAborted();
         await this.app.vault.createBinary(fileEntry.path, assembled.buffer);
       }
     } finally {
@@ -676,6 +801,7 @@ export class SyncEngine {
           }
           if (change.action === "delete") {
             await this.applyDelete({
+              opId: change.opId,
               path: change.path,
               mtime: change.mtime,
               fileVersion: change.fileVersion,
@@ -683,6 +809,7 @@ export class SyncEngine {
             });
           } else if (change.action === "rename") {
             await this.applyRename({
+              opId: change.opId,
               path: change.path,
               oldPath: change.oldPath,
               oldFileVersion: change.oldFileVersion,
@@ -693,6 +820,7 @@ export class SyncEngine {
             });
           } else {
             await this.applyFileEntry({
+              opId: change.opId,
               path: change.path,
               chunks: Array.from(change.chunks),
               mtime: change.mtime,
@@ -728,8 +856,10 @@ export class SyncEngine {
 
   private async syncPendingOps(): Promise<void> {
     const ops = await this.localState.getPendingOps();
-    for (const op of ops) {
+    for (const pending of ops) {
       try {
+        const op = await this.localState.beginPendingAttempt(pending.opId);
+        if (!op) continue;
         if (op.action === "put") {
           await this.commitPut(op);
         } else if (op.action === "delete") {
@@ -739,7 +869,8 @@ export class SyncEngine {
         }
         await this.localState.removePendingOp(op.opId);
       } catch (e) {
-        this.logError(`Pending operation ${op.opId} will be retried`, e);
+        this.logError(`Pending operation ${pending.opId} will be retried`, e);
+        break;
       }
     }
   }
@@ -845,6 +976,7 @@ export class SyncEngine {
 
   private async applyRename(fileEntry: {
     path: string;
+    opId?: string;
     oldPath: string | null;
     oldFileVersion: number | null;
     chunks: readonly string[];
@@ -859,6 +991,7 @@ export class SyncEngine {
     }
     await this.applyFileEntry(fileEntry);
     await this.applyDelete({
+      opId: fileEntry.opId,
       path: fileEntry.oldPath,
       mtime: fileEntry.mtime,
       fileVersion: fileEntry.oldFileVersion,
@@ -868,10 +1001,22 @@ export class SyncEngine {
 
   private async applyDelete(entry: {
     path: string;
+    opId?: string;
     mtime: number;
     fileVersion: number;
     globalVersion: number;
   }): Promise<void> {
+    if (!this.isSyncablePath(entry.path)) return;
+    const known = await this.localState.getFile(entry.path);
+    if (known && known.globalVersion > entry.globalVersion) return;
+    if (
+      entry.opId &&
+      (await this.localState.getPendingOps()).some((op) => op.opId === entry.opId && op.attempted)
+    ) {
+      await this.localState.putFile({ ...entry, chunks: [], deleted: true });
+      return;
+    }
+    this.abortController?.signal.throwIfAborted();
     this.applyingRemote = true;
     try {
       const existing = this.app.vault.getAbstractFileByPath(entry.path);
@@ -880,6 +1025,7 @@ export class SyncEngine {
         if (this.app.vault.getAbstractFileByPath(entry.path) !== existing) {
           throw new Error(`Local file changed while applying remote delete: ${entry.path}`);
         }
+        this.abortController?.signal.throwIfAborted();
         await this.app.fileManager.trashFile(existing);
       }
       await this.localState.putFile({
@@ -975,15 +1121,21 @@ export class SyncEngine {
       signal: this.abortController?.signal,
     });
     if (!resp.ok) throw new Error(`Download failed: ${resp.status}`);
-    return resp.arrayBuffer();
+    const data = await resp.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    const actual = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    if (actual !== hash) throw new Error(`Downloaded chunk hash mismatch: ${hash}`);
+    return data;
   }
 
-  private async apiCall<S extends Schema.Top>(
-    schema: S,
+  private async apiCall<A>(
+    schema: Schema.Decoder<A>,
     method: string,
     path: string,
     body?: unknown,
-  ): Promise<Schema.Schema.Type<S>> {
+  ): Promise<A> {
     const url = `${this.settings.workerUrl}${path}`;
     const opts: RequestInit = {
       method,
@@ -998,7 +1150,18 @@ export class SyncEngine {
     if (body) opts.body = JSON.stringify(body);
     const resp = await fetch(url, opts);
     if (!resp.ok) throw new Error(`API ${path}: ${resp.status}`);
-    return (decodeUnknownSync as any)(schema)(await resp.json()) as Schema.Schema.Type<S>;
+    const payload: unknown = await resp.json();
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "success" in payload &&
+      payload.success === false &&
+      "error" in payload &&
+      typeof payload.error === "string"
+    ) {
+      throw new Error(`API ${path}: ${payload.error}`);
+    }
+    return decodeUnknownSync(schema)(payload);
   }
 
   private async createConflictCopy(path: string, content: ArrayBuffer): Promise<void> {
@@ -1016,6 +1179,7 @@ export class SyncEngine {
     }
 
     await this.ensureFolder(candidate);
+    this.abortController?.signal.throwIfAborted();
     await this.app.vault.createBinary(candidate, content);
   }
 
@@ -1025,6 +1189,7 @@ export class SyncEngine {
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
       if (!this.app.vault.getAbstractFileByPath(current)) {
+        this.abortController?.signal.throwIfAborted();
         await this.app.vault.createFolder(current);
       }
     }
@@ -1039,7 +1204,13 @@ export class SyncEngine {
   }
 
   private isSyncablePath(path: string): boolean {
-    return !path.startsWith(`${this.app.vault.configDir}/`);
+    try {
+      decodeUnknownSync(FilePathSchema)(path);
+    } catch {
+      return false;
+    }
+    const configDir = this.app.vault.configDir;
+    return path !== configDir && !path.startsWith(`${configDir}/`);
   }
 
   private logError(message: string, error: unknown): void {

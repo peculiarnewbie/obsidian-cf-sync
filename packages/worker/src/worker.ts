@@ -1,6 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   ChunkHash as ChunkHashSchema,
+  FilePath as FilePathSchema,
+  type FilePath,
   ChangesQuery as ChangesQuerySchema,
   CommitRequest as CommitRequestSchema,
   DeviceEnrollmentRequest as DeviceEnrollmentRequestSchema,
@@ -40,103 +42,125 @@ function errorResponse(
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-
-    const context = getRpcContext(request);
-    if (!context.ok) return errorResponse({ error: context.error, code: "INVALID_VAULT_ID" });
-
-    if (url.pathname === "/devices/enroll" && request.method === "POST") {
-      if (!checkBootstrapAuth(request, env)) return new Response("Unauthorized", { status: 401 });
-      const validated = decodeRequest(DeviceEnrollmentRequestSchema, await request.json());
-      if (!validated.ok) return errorResponse(validated);
-      return await handleEnrollDevice(env, context.data, validated.data);
-    }
-
-    if (url.pathname === "/devices/revoke" && request.method === "POST") {
-      if (!checkBootstrapAuth(request, env)) return new Response("Unauthorized", { status: 401 });
-      const validated = decodeRequest(RevokeDeviceRequestSchema, await request.json());
-      if (!validated.ok) return errorResponse(validated);
-      return await handleRevokeDevice(env, context.data, validated.data);
-    }
-
-    const deviceAuth = await getDeviceAuthContext(request, env, context.data);
-    if (!deviceAuth.ok) return new Response("Unauthorized", { status: 401 });
-    const authenticatedContext = deviceAuth.data;
-
-    if (url.pathname.startsWith("/sync/ws")) {
-      return handleWebSocket(request, env, authenticatedContext);
-    }
-
+    let response: Response;
     try {
-      if (url.pathname === "/sync/chunk/:hash") {
-        return await handleChunkUpload(request, env, authenticatedContext);
-      }
-      const path = url.pathname;
-      if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
-        return await handleChunkUpload(request, env, authenticatedContext);
-      }
-      if (path === "/sync/prepare" && request.method === "POST") {
-        const validated = decodeRequest(PrepareRequestSchema, await request.json());
-        if (!validated.ok) return errorResponse(validated);
-        if (validated.data.deviceId !== authenticatedContext.deviceId) {
-          return errorResponse(
-            { error: "deviceId does not match authenticated device", code: "DEVICE_MISMATCH" },
-            403,
-          );
-        }
-        return await handleRpc(env, authenticatedContext, "prepare", validated.data);
-      }
-      if (path === "/sync/commit" && request.method === "POST") {
-        const validated = decodeRequest(CommitRequestSchema, await request.json());
-        if (!validated.ok) return errorResponse(validated);
-        if (validated.data.deviceId !== authenticatedContext.deviceId) {
-          return errorResponse(
-            { error: "deviceId does not match authenticated device", code: "DEVICE_MISMATCH" },
-            403,
-          );
-        }
-        return await handleRpc(env, authenticatedContext, "commit", validated.data);
-      }
-      if (path === "/sync/changes" && request.method === "GET") {
-        const query = decodeRequest(ChangesQuerySchema, {
-          since: url.searchParams.get("since") ?? "0",
-          ...(url.searchParams.has("through") ? { through: url.searchParams.get("through") } : {}),
-          ...(url.searchParams.has("limit") ? { limit: url.searchParams.get("limit") } : {}),
-        });
-        if (!query.ok) {
-          return errorResponse({ error: query.error, code: "INVALID_CHANGE_QUERY" });
-        }
-        if (!isValidChangesQuery(query.data)) {
-          return errorResponse({
-            error: "since, through, and limit must be safe integers within their allowed ranges",
-            code: "INVALID_CHANGE_QUERY",
-          });
-        }
-        if (query.data.through !== undefined && query.data.through < query.data.since) {
-          return errorResponse({
-            error: "through must be greater than or equal to since",
-            code: "INVALID_CHANGE_WINDOW",
-          });
-        }
-        return await handleRpc(env, authenticatedContext, "changes", query.data);
-      }
-      if (path === "/sync/index" && request.method === "GET") {
-        return await handleRpc(env, authenticatedContext, "getFullIndex", undefined);
-      }
-      if (path.startsWith("/sync/chunk/") && request.method === "GET") {
-        return await handleChunkDownload(request, env, authenticatedContext);
-      }
-
-      return new Response("Not found", { status: 404 });
-    } catch (e) {
-      return handleRouteError(e);
+      response = await routeRequest(request, env);
+    } catch (error) {
+      response = handleRouteError(error);
     }
+    if (response.status === 101) return response;
+    const headers = new Headers(response.headers);
+    for (const [key, value] of Object.entries(corsHeaders())) headers.set(key, value);
+    return new Response(response.body, { status: response.status, headers });
   },
 };
+
+async function routeRequest(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+
+  const context = getRpcContext(request);
+  if (!context.ok) return errorResponse({ error: context.error, code: "INVALID_VAULT_ID" });
+
+  if (url.pathname === "/devices/enroll" && request.method === "POST") {
+    if (!checkBootstrapAuth(request, env)) return new Response("Unauthorized", { status: 401 });
+    const validated = decodeRequest(DeviceEnrollmentRequestSchema, await readJson(request));
+    if (!validated.ok) return errorResponse(validated);
+    return await handleEnrollDevice(env, context.data, validated.data);
+  }
+
+  if (url.pathname === "/devices/revoke" && request.method === "POST") {
+    if (!checkBootstrapAuth(request, env)) return new Response("Unauthorized", { status: 401 });
+    const validated = decodeRequest(RevokeDeviceRequestSchema, await readJson(request));
+    if (!validated.ok) return errorResponse(validated);
+    return await handleRevokeDevice(env, context.data, validated.data);
+  }
+
+  const deviceAuth = await getDeviceAuthContext(request, env, context.data);
+  if (!deviceAuth.ok) return new Response("Unauthorized", { status: 401 });
+  const authenticatedContext = deviceAuth.data;
+
+  if (url.pathname.startsWith("/sync/ws")) {
+    return handleWebSocket(request, env, authenticatedContext);
+  }
+
+  try {
+    if (url.pathname === "/sync/chunk/:hash") {
+      return await handleChunkUpload(request, env, authenticatedContext);
+    }
+    const path = url.pathname;
+    if (path.startsWith("/sync/chunk/") && request.method === "PUT") {
+      return await handleChunkUpload(request, env, authenticatedContext);
+    }
+    if (path === "/sync/prepare" && request.method === "POST") {
+      const validated = decodeRequest(PrepareRequestSchema, await readJson(request));
+      if (!validated.ok) return errorResponse(validated);
+      if (validated.data.deviceId !== authenticatedContext.deviceId) {
+        return errorResponse(
+          { error: "deviceId does not match authenticated device", code: "DEVICE_MISMATCH" },
+          403,
+        );
+      }
+      return await handleRpc(env, authenticatedContext, "prepare", validated.data);
+    }
+    if (path === "/sync/commit" && request.method === "POST") {
+      const validated = decodeRequest(CommitRequestSchema, await readJson(request));
+      if (!validated.ok) return errorResponse(validated);
+      if (validated.data.deviceId !== authenticatedContext.deviceId) {
+        return errorResponse(
+          { error: "deviceId does not match authenticated device", code: "DEVICE_MISMATCH" },
+          403,
+        );
+      }
+      return await handleRpc(env, authenticatedContext, "commit", validated.data);
+    }
+    if (path === "/sync/changes" && request.method === "GET") {
+      const query = decodeRequest(ChangesQuerySchema, {
+        since: url.searchParams.get("since") ?? "0",
+        ...(url.searchParams.has("through") ? { through: url.searchParams.get("through") } : {}),
+        ...(url.searchParams.has("limit") ? { limit: url.searchParams.get("limit") } : {}),
+      });
+      if (!query.ok) {
+        return errorResponse({ error: query.error, code: "INVALID_CHANGE_QUERY" });
+      }
+      if (!isValidChangesQuery(query.data)) {
+        return errorResponse({
+          error: "since, through, and limit must be safe integers within their allowed ranges",
+          code: "INVALID_CHANGE_QUERY",
+        });
+      }
+      if (query.data.through !== undefined && query.data.through < query.data.since) {
+        return errorResponse({
+          error: "through must be greater than or equal to since",
+          code: "INVALID_CHANGE_WINDOW",
+        });
+      }
+      return await handleRpc(env, authenticatedContext, "changes", query.data);
+    }
+    if (path === "/sync/file" && request.method === "GET") {
+      const filePath = decodeRequest(FilePathSchema, url.searchParams.get("path"));
+      if (!filePath.ok) return errorResponse(filePath);
+      return Response.json(
+        await env.VaultDO.getByName(authenticatedContext.vaultId).getFileState({
+          path: filePath.data,
+        }),
+      );
+    }
+    if (path === "/sync/index" && request.method === "GET") {
+      return await handleRpc(env, authenticatedContext, "getFullIndex", undefined);
+    }
+    if (path.startsWith("/sync/chunk/") && request.method === "GET") {
+      return await handleChunkDownload(request, env, authenticatedContext);
+    }
+
+    return new Response("Not found", { status: 404 });
+  } catch (e) {
+    return handleRouteError(e);
+  }
+}
 
 function checkBootstrapAuth(request: Request, env: Env): boolean {
   const expected = typeof env.SYNC_API_KEY === "string" ? env.SYNC_API_KEY : env.SYNC_API_KEY.get();
@@ -221,7 +245,60 @@ function corsHeaders(): Record<string, string> {
   };
 }
 
+class RequestFailure extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function readLimitedBody(
+  request: Request,
+  limit: number,
+  code = "BODY_TOO_LARGE",
+): Promise<ArrayBuffer> {
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new RequestFailure(413, code, `Request exceeds ${limit} byte limit`);
+      }
+      parts.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
+  return result.buffer;
+}
+
+async function readJson(request: Request): Promise<unknown> {
+  const body = await readLimitedBody(request, 512 * 1024);
+  try {
+    return JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    throw new RequestFailure(400, "INVALID_JSON", "Malformed JSON request");
+  }
+}
+
 function handleRouteError(e: unknown): Response {
+  if (e instanceof RequestFailure)
+    return errorResponse({ error: e.message, code: e.code }, e.status);
   if (e instanceof Error) {
     return Response.json({ error: e.message, code: "INTERNAL_ERROR" }, { status: 500 });
   }
@@ -320,7 +397,7 @@ async function handleChunkUpload(
     }
   }
 
-  const body = await request.arrayBuffer();
+  const body = await readLimitedBody(request, MAX_CHUNK_BYTES, "CHUNK_TOO_LARGE");
   if (body.byteLength > MAX_CHUNK_BYTES) {
     return errorResponse({ error: "Chunk exceeds 512 KiB limit", code: "CHUNK_TOO_LARGE" }, 413);
   }
@@ -387,6 +464,12 @@ export class VaultDO extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.migrate();
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(
+        JSON.stringify({ type: "ping" }),
+        JSON.stringify({ type: "pong" }),
+      ),
+    );
   }
 
   private migrate() {
@@ -496,6 +579,7 @@ export class VaultDO extends DurableObject<Env> {
     body: DeviceEnrollmentRequest & { tokenHash: string },
   ): Promise<{ success: true; deviceId: string }> {
     const now = Date.now();
+    this.closeDeviceSockets(body.deviceId);
     this.sql.exec(
       `INSERT OR REPLACE INTO devices
        (device_id, name, platform, last_seen, last_sync_version, revoked, token_hash, enrolled_at)
@@ -513,6 +597,7 @@ export class VaultDO extends DurableObject<Env> {
 
   async revokeDevice(body: RevokeDeviceRequest): Promise<{ success: true; deviceId: string }> {
     this.sql.exec("UPDATE devices SET revoked = 1 WHERE device_id = ?", body.deviceId);
+    this.closeDeviceSockets(body.deviceId);
     return { success: true, deviceId: body.deviceId };
   }
 
@@ -539,20 +624,10 @@ export class VaultDO extends DurableObject<Env> {
   }
 
   async prepare(body: PrepareRequest) {
-    const { opId, file, chunks, baseFileVersion } = body;
+    const { file, chunks, baseFileVersion } = body;
 
-    const existingOp = this.queryOne(
-      "SELECT global_version, file_version FROM changes WHERE op_id = ?",
-      opId,
-    );
-    if (existingOp) {
-      return {
-        success: true,
-        alreadyCommitted: true,
-        globalVersion: Number(existingOp.global_version),
-        fileVersion: Number(existingOp.file_version),
-      };
-    }
+    const existingOp = this.committedOperation(body);
+    if (existingOp) return existingOp;
 
     const current = this.queryOne(
       "SELECT file_version, chunks_json, deleted FROM files WHERE path = ?",
@@ -565,7 +640,7 @@ export class VaultDO extends DurableObject<Env> {
         success: false,
         conflict: true,
         currentVersion,
-        currentChunks: current ? JSON.parse(String(current.chunks_json)) : [],
+        currentChunks: current ? (JSON.parse(String(current.chunks_json)) as string[]) : [],
       };
     }
 
@@ -575,7 +650,7 @@ export class VaultDO extends DurableObject<Env> {
           success: false,
           conflict: true,
           currentVersion,
-          currentChunks: JSON.parse(String(current.chunks_json)),
+          currentChunks: JSON.parse(String(current.chunks_json)) as string[],
         };
       }
       const source = this.queryOne(
@@ -593,7 +668,7 @@ export class VaultDO extends DurableObject<Env> {
           success: false,
           conflict: true,
           currentVersion: sourceVersion,
-          currentChunks: source ? JSON.parse(String(source.chunks_json)) : [],
+          currentChunks: source ? (JSON.parse(String(source.chunks_json)) as string[]) : [],
         };
       }
     }
@@ -621,19 +696,38 @@ export class VaultDO extends DurableObject<Env> {
     return result;
   }
 
-  private commitTransaction(body: CommitRequest) {
-    const existingOp = this.queryOne(
-      "SELECT global_version, file_version FROM changes WHERE op_id = ?",
-      body.opId,
-    );
-    if (existingOp) {
+  private committedOperation(body: CommitRequest) {
+    const existing = this.queryOne("SELECT * FROM changes WHERE op_id = ?", body.opId);
+    if (!existing) return undefined;
+    const matches =
+      existing.path === body.file &&
+      existing.action === body.action &&
+      existing.device_id === body.deviceId &&
+      Number(existing.mtime) === body.mtime &&
+      Number(existing.size) === body.size &&
+      existing.chunks_json === JSON.stringify(body.chunks) &&
+      Number(existing.file_version) === body.baseFileVersion + 1 &&
+      (body.action !== "rename" ||
+        (existing.old_path === body.oldPath &&
+          Number(existing.old_file_version) === body.oldBaseFileVersion + 1));
+    if (!matches) {
       return {
-        success: true as const,
-        alreadyCommitted: true as const,
-        globalVersion: Number(existingOp.global_version),
-        fileVersion: Number(existingOp.file_version),
+        success: false as const,
+        error: "Operation ID was already used for a different payload",
+        code: "OP_ID_REUSED",
       };
     }
+    return {
+      success: true as const,
+      alreadyCommitted: true as const,
+      fileVersion: Number(existing.file_version),
+      globalVersion: Number(existing.global_version),
+    };
+  }
+
+  private commitTransaction(body: CommitRequest) {
+    const existingOp = this.committedOperation(body);
+    if (existingOp) return existingOp;
 
     const current = this.queryOne(
       "SELECT file_version, global_version, chunks_json, deleted FROM files WHERE path = ?",
@@ -953,13 +1047,42 @@ export class VaultDO extends DurableObject<Env> {
         globalVersion: Number(row.global_version),
       }));
 
-    return { files, globalVersion: this.getGlobalVersion() };
+    const tombstones = this.sql
+      .exec("SELECT path, mtime, file_version, global_version FROM files WHERE deleted = 1")
+      .toArray()
+      .map((row) => ({
+        path: String(row.path),
+        mtime: Number(row.mtime),
+        fileVersion: Number(row.file_version),
+        globalVersion: Number(row.global_version),
+      }));
+    return { files, tombstones, globalVersion: this.getGlobalVersion() };
+  }
+
+  async getFileState({ path }: { path: FilePath }) {
+    const row = this.queryOne("SELECT * FROM files WHERE path = ?", path);
+    return {
+      file: row
+        ? {
+            path: String(row.path),
+            chunks: JSON.parse(String(row.chunks_json)) as string[],
+            mtime: Number(row.mtime),
+            size: Number(row.size),
+            fileVersion: Number(row.file_version),
+            globalVersion: Number(row.global_version),
+            deleted: Number(row.deleted) !== 0,
+          }
+        : null,
+    };
   }
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") === "websocket") {
       const pair = new WebSocketPair();
-      this.ctx.acceptWebSocket(pair[1]);
+      const deviceId =
+        request.headers.get("X-Device-Id") ?? new URL(request.url).searchParams.get("deviceId");
+      if (!deviceId) return new Response("Unauthorized", { status: 401 });
+      this.ctx.acceptWebSocket(pair[1], [deviceId]);
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     return new Response("VaultDO", { status: 200 });
@@ -977,7 +1100,13 @@ export class VaultDO extends DurableObject<Env> {
     }
   }
 
-  async webSocketClose(_ws: WebSocket) {}
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    ws.close(code === 1005 || code === 1006 || code === 1015 ? 1000 : code, reason);
+  }
+
+  private closeDeviceSockets(deviceId: string): void {
+    for (const ws of this.ctx.getWebSockets(deviceId)) ws.close(1008, "Device credentials changed");
+  }
 
   private getGlobalVersion(): number {
     const row = this.queryOne("SELECT value FROM vault_meta WHERE key = 'globalVersion'");

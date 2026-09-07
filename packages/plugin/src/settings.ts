@@ -44,6 +44,7 @@ export class SyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.workerUrl)
           .onChange(async (value) => {
             this.plugin.settings.workerUrl = value;
+            this.plugin.settings.deviceToken = "";
             await this.plugin.saveSettings();
           }),
       );
@@ -57,6 +58,7 @@ export class SyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.vaultId)
           .onChange(async (value) => {
             this.plugin.settings.vaultId = value;
+            this.plugin.settings.deviceToken = "";
             await this.plugin.saveSettings();
           }),
       );
@@ -64,7 +66,7 @@ export class SyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("API Key")
       .setDesc(
-        "Bootstrap key used to enroll this device. Sync uses the device token after pairing.",
+        "Bootstrap key used to enroll this device and cleared after pairing. Sync uses the device token.",
       )
       .addText((text) => {
         text.inputEl.type = "password";

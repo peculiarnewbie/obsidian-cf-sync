@@ -47,8 +47,8 @@ export default defineConfig({
         exports: "default",
       },
     },
-    minify: false,
-    sourcemap: "inline",
+    minify: "esbuild",
+    sourcemap: true,
     target: "es2018",
   },
   define: {

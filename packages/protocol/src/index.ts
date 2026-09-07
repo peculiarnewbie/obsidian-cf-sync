@@ -7,7 +7,9 @@ export const VaultId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,12
 );
 export type VaultId = Schema.Schema.Type<typeof VaultId>;
 
-export const DeviceId = Schema.String.check(Schema.isMinLength(1)).pipe(Schema.brand("DeviceId"));
+export const DeviceId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)).pipe(
+  Schema.brand("DeviceId"),
+);
 export type DeviceId = Schema.Schema.Type<typeof DeviceId>;
 
 export const OpId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)).pipe(
@@ -20,8 +22,10 @@ export const FilePath = Schema.String.pipe(
     (path: unknown): path is string =>
       typeof path === "string" &&
       path.length > 0 &&
-      !path.startsWith("/") &&
-      !path.includes("..") &&
+      path.length <= 2048 &&
+      !path.includes("\\") &&
+      !path.includes(":") &&
+      path.split("/").every((part) => part.length > 0 && part !== "." && part !== "..") &&
       !Array.from(path).some((char) => char.charCodeAt(0) < 32),
   ),
   Schema.brand("FilePath"),
@@ -151,10 +155,18 @@ export const ConflictResponse = Schema.Struct({
 });
 export type ConflictResponse = Schema.Schema.Type<typeof ConflictResponse>;
 
+export const ProtocolErrorResponse = Schema.Struct({
+  success: Schema.Literal(false),
+  error: Schema.String,
+  code: Schema.String,
+});
+export type ProtocolErrorResponse = Schema.Schema.Type<typeof ProtocolErrorResponse>;
+
 export const PrepareResponse = Schema.Union([
   PrepareOkResponse,
   AlreadyCommittedResponse,
   ConflictResponse,
+  ProtocolErrorResponse,
 ]);
 export type PrepareResponse = Schema.Schema.Type<typeof PrepareResponse>;
 
@@ -164,13 +176,6 @@ export const CommitOkResponse = Schema.Struct({
   globalVersion: GlobalVersion,
 });
 export type CommitOkResponse = Schema.Schema.Type<typeof CommitOkResponse>;
-
-export const ProtocolErrorResponse = Schema.Struct({
-  success: Schema.Literal(false),
-  error: Schema.String,
-  code: Schema.String,
-});
-export type ProtocolErrorResponse = Schema.Schema.Type<typeof ProtocolErrorResponse>;
 
 export const CommitResponse = Schema.Union([
   CommitOkResponse,
@@ -214,8 +219,21 @@ export const FileIndexEntry = Schema.Struct({
 });
 export type FileIndexEntry = Schema.Schema.Type<typeof FileIndexEntry>;
 
+export const FileStateResponse = Schema.Struct({
+  file: Schema.NullOr(Schema.Struct({ ...FileIndexEntry.fields, deleted: Schema.Boolean })),
+});
+export type FileStateResponse = Schema.Schema.Type<typeof FileStateResponse>;
+
+export const FileTombstone = Schema.Struct({
+  path: FilePath,
+  mtime: Mtime,
+  fileVersion: FileVersion,
+  globalVersion: GlobalVersion,
+});
+
 export const FullIndexResponse = Schema.Struct({
   files: Schema.Array(FileIndexEntry),
+  tombstones: Schema.optionalKey(Schema.Array(FileTombstone)),
   globalVersion: GlobalVersion,
 });
 export type FullIndexResponse = Schema.Schema.Type<typeof FullIndexResponse>;

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SELF } from "cloudflare:test";
-import { SimulatedClient } from "../../../plugin/test-support/simulated-client";
+import ObsidianCfSyncPlugin from "../../../plugin/src/main";
+import { SimulatedClient, IDBFactory } from "../../../plugin/test-support/simulated-client";
 import {
   DeviceEnrollmentResponse,
   FullIndexResponse,
@@ -29,6 +30,7 @@ type Fault = {
 /** Requests reach the real Worker and real local DO/R2 bindings. Only delivery is controlled. */
 class Network {
   offline = new Set<string>();
+  corruptOnce = new Set<string>();
   requests: { device: string; path: string; method: string }[] = [];
   private faults: Fault[] = [];
   private active = new Set<Fault>();
@@ -75,6 +77,12 @@ class Network {
     // bodies do not keep workerd streams alive between isolated tests.
     const body = await response.arrayBuffer();
     if (fault?.phase === "response") await pause();
+    if (this.corruptOnce.delete(`${device}:${path}`)) {
+      return new Response(new Uint8Array([0, 1, 2]), {
+        status: response.status,
+        headers: response.headers,
+      });
+    }
     return new Response(body, { status: response.status, headers: response.headers });
   };
 }
@@ -91,19 +99,26 @@ class UnavailableWebSocket {
 
 let network: Network;
 let clients: SimulatedClient[];
+let plugins: ObsidianCfSyncPlugin[];
 let vaultId: string;
 
 beforeEach(() => {
+  vi.stubGlobal("indexedDB", new IDBFactory());
   network = new Network();
   clients = [];
+  plugins = [];
   vaultId = `e2e-${crypto.randomUUID()}`;
   vi.stubGlobal("fetch", network.fetch);
   vi.stubGlobal("WebSocket", UnavailableWebSocket);
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(async () => {
   network.releaseAll();
+  for (const plugin of plugins) {
+    plugin.onunload();
+    await plugin.syncEngine?.shutdown();
+  }
   await Promise.all(clients.map((client) => client.stop()));
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -299,7 +314,7 @@ describe("two SyncEngines against local Worker / Durable Object / R2", () => {
   });
 });
 
-describe("delayed delivery and known recovery regressions", () => {
+describe("delayed delivery and recovery regressions", () => {
   it("catches up after an older change-page response arrives behind a newer server commit", async () => {
     const a = await client();
     const b = await client();
@@ -318,9 +333,7 @@ describe("delayed delivery and known recovery regressions", () => {
     expect(b.snapshot()).toEqual({ "ordered.md": "version two" });
   });
 
-  // Expected failures assert the desired behavior, not today's broken result.
-  // Fixing either regression produces an unexpected pass: remove .fails with the fix.
-  it.fails("preserves an edit made after a rename committed but its acknowledgement was lost", async () => {
+  it("preserves an edit made after a rename committed but its acknowledgement was lost", async () => {
     const a = await client();
     const b = await client();
     a.write("before.md", "original");
@@ -341,7 +354,7 @@ describe("delayed delivery and known recovery regressions", () => {
     expect(Object.values(a.snapshot())).toContain("edit after ambiguous rename");
   });
 
-  it.fails("resumes a remote bootstrap interrupted after its first file was written", async () => {
+  it("resumes a remote bootstrap interrupted after its first file was written", async () => {
     const a = await client();
     a.write("a.md", "first imported file");
     a.write("b.md", "second imported file");
@@ -359,5 +372,180 @@ describe("delayed delivery and known recovery regressions", () => {
     await b.restart();
     expect(b.engine.active).toBe(true);
     await converged(a, b);
+  });
+});
+
+describe("client safety boundaries", () => {
+  it("retains tombstone versions when a fresh client recreates a deleted path", async () => {
+    const a = await client();
+    a.write("reused.md", "original");
+    await a.sync();
+    a.remove("reused.md");
+    await a.sync();
+    const b = await client();
+    expect(await b.state.getFile("reused.md")).toMatchObject({ deleted: true, fileVersion: 2 });
+    b.write("reused.md", "fresh recreation");
+    await converged(a, b);
+    expect(a.snapshot()).toEqual({ "reused.md": "fresh recreation" });
+  });
+
+  it("rejects a corrupt chunk without caching it or advancing past that change", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("verified.md", "verified content");
+    await a.sync();
+    const hash = (await remote(a)).files[0]!.chunks[0]!;
+    network.corruptOnce.add(`${b.settings.deviceId}:/sync/chunk/${hash}`);
+    // After the failed first catch-up, hold the retry to inspect persisted state.
+    const first = network.hold(b.settings.deviceId, `/sync/chunk/${hash}`);
+    const receiving = b.sync();
+    await first.reached;
+    const retry = network.hold(b.settings.deviceId, `/sync/chunk/${hash}`);
+    first.release();
+    await retry.reached;
+    expect(await b.state.getChunkData(hash)).toBeUndefined();
+    expect((await b.state.getSyncState()).globalVersion).toBe(0);
+    expect(b.snapshot()).toEqual({});
+    retry.release();
+    await receiving;
+    await converged(a, b);
+    expect(b.snapshot()).toEqual({ "verified.md": "verified content" });
+  });
+
+  it("skips incoming configuration files while continuing the ordered change log", async () => {
+    const a = await client();
+    const b = await client();
+    const response = await network.fetch(`${ORIGIN}/sync/commit`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${a.settings.deviceToken}`,
+        "X-Vault-Id": vaultId,
+        "X-Device-Id": a.settings.deviceId,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        opId: crypto.randomUUID(),
+        action: "put",
+        file: ".obsidian/plugins/other/main.js",
+        chunks: [],
+        size: 0,
+        mtime: 1,
+        baseFileVersion: 0,
+        deviceId: a.settings.deviceId,
+      }),
+    });
+    expect(await response.json()).toMatchObject({ success: true });
+    await b.sync();
+    expect(b.snapshot()).toEqual({});
+    expect((await b.state.getSyncState()).globalVersion).toBe(1);
+    a.write("ordinary.md", "still syncs");
+    await a.sync();
+    await b.sync();
+    expect(b.snapshot()).toEqual({ "ordinary.md": "still syncs" });
+  });
+
+  it("does not mutate local files after shutdown while a download is delayed", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("delayed-stop.md", "must wait for a new engine");
+    await a.sync();
+    const hash = (await remote(a)).files[0]!.chunks[0]!;
+    const download = network.hold(b.settings.deviceId, `/sync/chunk/${hash}`);
+    const receiving = b.sync();
+    await download.reached;
+    const stopping = b.stop();
+    download.release();
+    await Promise.all([receiving, stopping]);
+    expect(b.snapshot()).toEqual({});
+    expect((await b.state.getSyncState()).globalVersion).toBe(0);
+    await b.restart();
+    await converged(a, b);
+  });
+});
+
+describe("successors of operations with lost acknowledgements", () => {
+  it("keeps a deletion queued behind an ambiguously committed creation", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("temporary.md", "created before deletion");
+    const ack = network.hold(a.settings.deviceId, "/sync/commit");
+    const sending = a.sync();
+    await ack.reached;
+    network.offline.add(a.settings.deviceId);
+    ack.release(true);
+    await sending;
+    a.remove("temporary.md");
+    await a.sync();
+    expect(await a.state.getPendingOps()).toHaveLength(2);
+    await a.restart();
+    network.offline.delete(a.settings.deviceId);
+    await converged(a, b);
+    expect(a.snapshot()).toEqual({});
+  });
+
+  it("keeps a second rename queued behind an ambiguously committed first rename", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("one.md", "rename chain");
+    await converged(a, b);
+    a.rename("one.md", "two.md");
+    const ack = network.hold(a.settings.deviceId, "/sync/commit");
+    const sending = a.sync();
+    await ack.reached;
+    network.offline.add(a.settings.deviceId);
+    ack.release(true);
+    await sending;
+    a.rename("two.md", "three.md");
+    await a.sync();
+    expect(await a.state.getPendingOps()).toHaveLength(2);
+    network.offline.delete(a.settings.deviceId);
+    await converged(a, b);
+    expect(a.snapshot()).toEqual({ "three.md": "rename chain" });
+  });
+});
+
+describe("plugin lifecycle and idle work", () => {
+  it("stops on disable, resumes on enable, and keeps the active engine for unchanged sync identity", async () => {
+    const a = await client();
+    const b = await client();
+    await a.stop();
+    const plugin = new ObsidianCfSyncPlugin(a.app, {
+      id: "obsidian-cf-sync",
+      name: "Sync",
+      version: "test",
+      minAppVersion: "1.0.0",
+      author: "test",
+      description: "test",
+    });
+    plugins.push(plugin);
+    await plugin.saveData(a.settings);
+    await plugin.onload();
+    const active = plugin.syncEngine;
+    expect(active?.active).toBe(true);
+    plugin.settings.apiKey = "administrative setting only";
+    await plugin.saveSettings();
+    expect(plugin.syncEngine).toBe(active);
+    plugin.settings.enabled = false;
+    await plugin.saveSettings();
+    expect(active?.active).toBe(false);
+    expect(plugin.syncEngine).toBeNull();
+    a.write("while-disabled.md", "local until enabled");
+    await b.sync();
+    expect(b.snapshot()).toEqual({});
+    plugin.settings.enabled = true;
+    await plugin.saveSettings();
+    await plugin.syncEngine?.syncNow();
+    await b.sync();
+    expect(b.snapshot()).toEqual({ "while-disabled.md": "local until enabled" });
+  });
+
+  it("does not repeatedly read unchanged file bodies during idle coordinator passes", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("unchanged.md", "no repeated hashing");
+    await converged(a, b);
+    const reads = [a.reads, b.reads];
+    await converged(a, b);
+    expect([a.reads, b.reads]).toEqual(reads);
   });
 });

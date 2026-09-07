@@ -89,7 +89,7 @@ describe("VaultDO", () => {
       }),
     );
     expect(prepResult.success).toBe(true);
-    expect(prepResult.missing).toEqual([]);
+    expect(prepResult).toMatchObject({ missing: [] });
 
     // Commit
     const commitResult = await stub.commit(
@@ -152,8 +152,8 @@ describe("VaultDO", () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.conflict).toBe(true);
-    expect(result.currentVersion).toBe(1);
+    expect(result).toMatchObject({ conflict: true });
+    expect(result).toMatchObject({ currentVersion: 1 });
 
     const futureVersion = await stub.prepare(
       decodeUnknownSync(PrepareRequest)({
@@ -344,7 +344,7 @@ describe("VaultDO", () => {
       }),
     );
     expect(prepResult.success).toBe(true);
-    expect(prepResult.missing).toEqual([]);
+    expect(prepResult).toMatchObject({ missing: [] });
 
     const commitResult = await stub.commit(
       decodeUnknownSync(CommitRequest)({
@@ -441,6 +441,7 @@ describe("Worker sync HTTP routes", () => {
       "changes",
       "commit",
       "enrollDevice",
+      "file",
       "index",
       "prepare",
       "revokeDevice",
@@ -962,5 +963,154 @@ describe("Worker sync HTTP routes", () => {
       workerEnv(),
     );
     expect(revokedResp.status).toBe(401);
+  });
+});
+
+describe("sync hardening", () => {
+  it("rejects reuse of a committed operation ID with changed content or identity", async () => {
+    const stub = env.VaultDO.getByName("operation-payload-binding");
+    const body = decodeUnknownSync(CommitRequest)({
+      opId: "bound-operation",
+      action: "put",
+      file: "note.md",
+      chunks: [],
+      mtime: 1,
+      size: 0,
+      baseFileVersion: 0,
+      deviceId: "device-a",
+    });
+    expect(await stub.commit(body)).toMatchObject({ success: true, globalVersion: 1 });
+    for (const change of [
+      { mtime: 2 },
+      { file: "different.md" },
+      { deviceId: "device-b" },
+      { baseFileVersion: 1 },
+    ]) {
+      const reused = decodeUnknownSync(CommitRequest)({ ...body, ...change });
+      expect(await stub.prepare(reused)).toMatchObject({ success: false, code: "OP_ID_REUSED" });
+      expect(await stub.commit(reused)).toMatchObject({ success: false, code: "OP_ID_REUSED" });
+    }
+    expect(await stub.commit(body)).toMatchObject({
+      success: true,
+      alreadyCommitted: true,
+      globalVersion: 1,
+    });
+    expect((await stub.changes({ since: 0 })).changes).toHaveLength(1);
+  });
+
+  it("returns CORS headers on successful, unauthorized, and malformed JSON responses", async () => {
+    const vault = "cors-and-json";
+    const token = await enrollDevice(vault);
+    const success = await worker.fetch(request("/sync/index", {}, vault, token), workerEnv());
+    expect(success.status).toBe(200);
+    const unauthorized = await worker.fetch(
+      request("/sync/index", {}, vault, "wrong"),
+      workerEnv(),
+    );
+    expect(unauthorized.status).toBe(401);
+    const malformed = await worker.fetch(
+      bootstrapRequest("/devices/enroll", { method: "POST", body: "{" }, vault),
+      workerEnv(),
+    );
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ code: "INVALID_JSON" });
+    for (const response of [success, unauthorized, malformed]) {
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    }
+  });
+
+  it("cancels an oversized streaming upload without requiring Content-Length", async () => {
+    const vault = "bounded-stream";
+    const token = await enrollDevice(vault);
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(512 * 1024));
+        controller.enqueue(new Uint8Array(1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = await worker.fetch(
+      request(
+        `/sync/chunk/${"a".repeat(64)}`,
+        {
+          method: "PUT",
+          body: stream,
+        },
+        vault,
+        token,
+      ),
+      workerEnv(),
+    );
+    expect(response.status).toBe(413);
+    expect(cancelled).toBe(true);
+    expect(await env.VaultDO.getByName(vault).hasChunk({ hash: "a".repeat(64) })).toEqual({
+      exists: false,
+    });
+  });
+
+  it("rejects noncanonical paths before committing metadata", async () => {
+    const vault = "canonical-paths";
+    const token = await enrollDevice(vault);
+    for (const file of [
+      "../note.md",
+      "a/../note.md",
+      "a//note.md",
+      "a/./note.md",
+      "a\\note.md",
+      "C:/note.md",
+    ]) {
+      const response = await worker.fetch(
+        request(
+          "/sync/commit",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              opId: crypto.randomUUID(),
+              action: "put",
+              file,
+              chunks: [],
+              mtime: 1,
+              size: 0,
+              baseFileVersion: 0,
+              deviceId: "http-device-1",
+            }),
+          },
+          vault,
+          token,
+        ),
+        workerEnv(),
+      );
+      expect(response.status).toBe(400);
+    }
+    expect((await env.VaultDO.getByName(vault).getFullIndex()).globalVersion).toBe(0);
+  });
+
+  it("closes existing WebSockets when a device is revoked", async () => {
+    const vault = "revoke-live-socket";
+    const token = await enrollDevice(vault);
+    const response = await worker.fetch(
+      request("/sync/ws", { headers: { Upgrade: "websocket" } }, vault, token),
+      workerEnv(),
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (!socket) throw new Error("Expected upgraded WebSocket");
+    socket.accept();
+    const closed = new Promise<number>((resolve) =>
+      socket.addEventListener("close", (event) => resolve(event.code), { once: true }),
+    );
+    await worker.fetch(
+      bootstrapRequest(
+        "/devices/revoke",
+        { method: "POST", body: JSON.stringify({ deviceId: "http-device-1" }) },
+        vault,
+      ),
+      workerEnv(),
+    );
+    expect(await closed).toBe(1008);
+    socket.close();
   });
 });

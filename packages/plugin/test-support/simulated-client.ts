@@ -1,4 +1,5 @@
 import "fake-indexeddb/auto";
+export { IDBFactory } from "fake-indexeddb";
 import { App, TFile } from "obsidian";
 import { SyncEngine } from "../src/sync-engine";
 import { LocalState } from "../src/local-state";
@@ -24,7 +25,8 @@ export class SimulatedClient {
   readonly state: LocalState;
   engine: SyncEngine;
   private listeners = new Set<Listener>();
-  private readonly app: App;
+  readonly app: App;
+  reads = 0;
 
   constructor(readonly settings: PluginSettings) {
     this.state = new LocalState(settings);
@@ -35,7 +37,10 @@ export class SimulatedClient {
         getFiles: () => [...this.files.values()],
         getAbstractFileByPath: (path: string) =>
           this.files.get(path) ?? (this.folders.has(path) ? { path } : null),
-        readBinary: async (file: MemoryFile) => file.content.slice(0),
+        readBinary: async (file: MemoryFile) => {
+          this.reads += 1;
+          return file.content.slice(0);
+        },
         createBinary: async (path: string, bytes: ArrayBuffer) => this.create(path, bytes),
         modifyBinary: async (file: MemoryFile, bytes: ArrayBuffer) => this.modify(file, bytes),
         createFolder: async (path: string) => {
@@ -66,9 +71,7 @@ export class SimulatedClient {
   }
 
   async stop() {
-    this.engine.stop();
-    // Drain an existing coordinator before discarding the host instance.
-    await this.engine.syncNow();
+    await this.engine.shutdown();
   }
 
   sync() {

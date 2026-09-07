@@ -9,9 +9,13 @@ import { SyncEngine } from "./sync-engine";
 export default class ObsidianCfSyncPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
   syncEngine: SyncEngine | null = null;
+  private loaded = false;
+  private settingsPass: Promise<void> = Promise.resolve();
+  private engineSettingsKey = "";
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    this.loaded = true;
 
     this.addSettingTab(new SyncSettingTab(this.app, this));
 
@@ -42,7 +46,8 @@ export default class ObsidianCfSyncPlugin extends Plugin {
   }
 
   onunload(): void {
-    this.syncEngine?.stop();
+    this.loaded = false;
+    void this.syncEngine?.shutdown();
   }
 
   async loadSettings(): Promise<void> {
@@ -54,7 +59,44 @@ export default class ObsidianCfSyncPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    const snapshot = {
+      ...this.settings,
+      workerUrl: this.settings.workerUrl.trim().replace(/\/+$/, ""),
+    };
+    const work = this.settingsPass.then(async () => {
+      await this.saveData(snapshot);
+      if (this.loaded) await this.applySettings(snapshot);
+    });
+    this.settingsPass = work.catch((error: unknown) => {
+      console.error("Unable to apply sync settings", error);
+      new Notice("Unable to apply sync settings; check the Worker URL and pairing");
+    });
+    await this.settingsPass;
+  }
+
+  private async applySettings(settings: PluginSettings): Promise<void> {
+    const key = JSON.stringify([
+      settings.workerUrl,
+      settings.vaultId,
+      settings.deviceId,
+      settings.deviceToken,
+      settings.enabled,
+      settings.syncInterval,
+    ]);
+    if (key === this.engineSettingsKey && this.syncEngine?.active) return;
+    await this.syncEngine?.shutdown();
+    this.syncEngine = null;
+    this.engineSettingsKey = key;
+    if (
+      !settings.enabled ||
+      !settings.workerUrl ||
+      !settings.vaultId ||
+      !settings.deviceToken ||
+      !this.loaded
+    )
+      return;
+    this.syncEngine = new SyncEngine(this.app, settings);
+    await this.syncEngine.start();
   }
 
   async enrollDevice(): Promise<void> {
@@ -63,15 +105,16 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       return;
     }
 
-    const resp = await fetch(`${this.settings.workerUrl}/devices/enroll`, {
+    const pairing = { ...this.settings };
+    const resp = await fetch(`${pairing.workerUrl.trim().replace(/\/+$/, "")}/devices/enroll`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${this.settings.apiKey}`,
-        "X-Vault-Id": this.settings.vaultId,
+        Authorization: `Bearer ${pairing.apiKey}`,
+        "X-Vault-Id": pairing.vaultId,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        deviceId: this.settings.deviceId,
+        deviceId: pairing.deviceId,
         name: this.app.vault.getName(),
         platform: navigator.userAgent.includes("Mobile") ? "mobile" : "desktop",
       }),
@@ -83,6 +126,16 @@ export default class ObsidianCfSyncPlugin extends Plugin {
     }
 
     const enrollment = decodeUnknownSync(DeviceEnrollmentResponseSchema)(await resp.json());
+    if (
+      pairing.workerUrl !== this.settings.workerUrl ||
+      pairing.vaultId !== this.settings.vaultId ||
+      pairing.deviceId !== this.settings.deviceId ||
+      !this.loaded
+    ) {
+      new Notice("Pairing settings changed; pair again using the current settings");
+      return;
+    }
+    this.settings.apiKey = "";
     this.settings.deviceId = enrollment.deviceId;
     this.settings.deviceToken = enrollment.deviceToken;
     await this.saveSettings();
@@ -90,14 +143,15 @@ export default class ObsidianCfSyncPlugin extends Plugin {
   }
 
   private async startSync(): Promise<void> {
+    if (!this.settings.enabled) {
+      new Notice("Enable sync in settings first");
+      return;
+    }
     if (!this.settings.workerUrl || !this.settings.vaultId || !this.settings.deviceToken) {
       new Notice("Configure worker URL and vault ID, then pair this device first");
       return;
     }
-
-    this.syncEngine?.stop();
-    this.syncEngine = new SyncEngine(this.app, this.settings);
-    await this.syncEngine.start();
-    if (this.syncEngine.active) new Notice("Sync started");
+    await this.saveSettings();
+    await this.syncEngine?.syncNow();
   }
 }
