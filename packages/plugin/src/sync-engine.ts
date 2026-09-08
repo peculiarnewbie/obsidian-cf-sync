@@ -1131,7 +1131,7 @@ export class SyncEngine {
   }
 
   private async apiCall<A>(
-    schema: Schema.Decoder<A>,
+    schema: Schema.ConstraintDecoder<A>,
     method: string,
     path: string,
     body?: unknown,

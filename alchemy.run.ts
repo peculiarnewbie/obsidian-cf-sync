@@ -1,6 +1,7 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
+import * as Config from "effect/Config";
 import type { VaultDO } from "./packages/worker/src/worker.ts";
 
 export default Alchemy.Stack(
@@ -10,9 +11,7 @@ export default Alchemy.Stack(
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
-    const apiKey = yield* Alchemy.Secret("SYNC_API_KEY");
-
-    const chunksBucket = yield* Cloudflare.R2Bucket("vault-chunks");
+    const chunksBucket = yield* Cloudflare.R2.Bucket("vault-chunks");
 
     const site = yield* Cloudflare.Worker("obsidian-cf-sync", {
       main: "./packages/worker/src/worker.ts",
@@ -20,10 +19,10 @@ export default Alchemy.Stack(
         date: "2025-01-01",
         flags: ["nodejs_compat"],
       },
-      bindings: {
+      env: {
         CHUNKS_BUCKET: chunksBucket,
-        SYNC_API_KEY: apiKey,
-        VaultDO: Cloudflare.DurableObjectNamespace<VaultDO>("VaultDO", {
+        SYNC_API_KEY: Config.redacted("SYNC_API_KEY"),
+        VaultDO: Cloudflare.DurableObject<VaultDO>("VaultDO", {
           className: "VaultDO",
         }),
       },

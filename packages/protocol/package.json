@@ -9,7 +9,7 @@
     "./http-api": "./src/http-api.ts"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.70"
+    "effect": "4.0.0-beta.92"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

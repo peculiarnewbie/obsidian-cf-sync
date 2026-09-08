@@ -94,10 +94,10 @@ The build output in `packages/plugin/dist` contains the installable Obsidian plu
 - `manifest.json`
 - `styles.css`
 
-Deploy with Alchemy:
+Set `SYNC_API_KEY` in an ignored local `.env` file, then deploy with Alchemy:
 
 ```sh
-pnpm deploy
+pnpm deploy --stage prod
 ```
 
 Plan or destroy the Alchemy stack:

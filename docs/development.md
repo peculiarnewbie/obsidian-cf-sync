@@ -17,8 +17,8 @@ pnpm lint
 pnpm fmt
 pnpm check
 pnpm typecheck
-pnpm deploy
-pnpm plan
+pnpm deploy --stage prod
+pnpm plan --stage prod
 pnpm destroy
 ```
 
@@ -52,7 +52,7 @@ are declared in `src/__tests__/env.d.ts`, derived from the Worker's `Env`.
 The standalone Oxc dependencies exclude optional Vite Plus/type-aware lint
 peers; TypeScript performs the full typecheck.
 
-Effect 4.0.0-beta.70 supplies protocol schemas and the shared HTTP API contract.
+Effect 4.0.0-beta.92 supplies protocol schemas and the shared HTTP API contract.
 Alchemy deployment uses `Effect.gen`; the plugin's sync coordinator and Worker
 request handlers otherwise use ordinary async/await.
 
@@ -177,7 +177,10 @@ The plugin is marked `isDesktopOnly: false`, and the implementation avoids Node/
 
 ## Deployment
 
-Alchemy is the primary deployment path in this repo.
+Alchemy is the primary deployment path in this repo. The deployed stack uses the
+`prod` stage; pass `--stage prod` for plans and deployments. Set `SYNC_API_KEY`
+in a local `.env` file (ignored by Git, permissions `0600`); it is deployed as
+a Worker secret. Keep this key for pairing devices.
 
 `alchemy.run.ts` provisions:
 
@@ -190,13 +193,13 @@ Alchemy is the primary deployment path in this repo.
 Plan deployment:
 
 ```sh
-pnpm plan
+pnpm plan --stage prod
 ```
 
 Deploy:
 
 ```sh
-pnpm deploy
+pnpm deploy --stage prod
 ```
 
 Destroy:

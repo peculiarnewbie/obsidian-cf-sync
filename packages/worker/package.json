@@ -10,8 +10,8 @@
   },
   "dependencies": {
     "@obsidian-cf-sync/protocol": "workspace:*",
-    "alchemy": "2.0.0-beta.44",
-    "effect": "4.0.0-beta.70"
+    "alchemy": "2.0.0-beta.59",
+    "effect": "4.0.0-beta.92"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.9",

@@ -19,17 +19,18 @@
     "fmt:check": "oxfmt --check ."
   },
   "dependencies": {
-    "alchemy": "2.0.0-beta.44",
-    "effect": "4.0.0-beta.70"
+    "alchemy": "2.0.0-beta.59",
+    "effect": "4.0.0-beta.92"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260523.1",
-    "@effect/vitest": "4.0.0-beta.70",
-    "vite": "8.2.2",
-    "vitest": "^4.1.7",
-    "typescript": "7.0.2",
+    "@effect/platform-node": "4.0.0-beta.92",
+    "@effect/vitest": "4.0.0-beta.92",
+    "oxfmt": "0.67.0",
     "oxlint": "1.82.0",
-    "oxfmt": "0.67.0"
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vitest": "^4.1.7"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {
