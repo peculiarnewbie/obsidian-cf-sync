@@ -706,7 +706,9 @@ export class SyncEngine {
   }): Promise<void> {
     if (!this.isSyncablePath(fileEntry.path)) return;
     const known = await this.localState.getFile(fileEntry.path);
-    if (known && known.globalVersion > fileEntry.globalVersion) return;
+    // Acknowledged versions are already our baseline. Replaying an equal
+    // version would overwrite edits made while its acknowledgement was in flight.
+    if (known && known.globalVersion >= fileEntry.globalVersion) return;
     if (
       fileEntry.opId &&
       (await this.localState.getPendingOps()).some(
@@ -1008,7 +1010,7 @@ export class SyncEngine {
   }): Promise<void> {
     if (!this.isSyncablePath(entry.path)) return;
     const known = await this.localState.getFile(entry.path);
-    if (known && known.globalVersion > entry.globalVersion) return;
+    if (known && known.globalVersion >= entry.globalVersion) return;
     if (
       entry.opId &&
       (await this.localState.getPendingOps()).some((op) => op.opId === entry.opId && op.attempted)

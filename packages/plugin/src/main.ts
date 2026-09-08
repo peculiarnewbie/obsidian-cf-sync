@@ -41,7 +41,15 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       this.settings.vaultId &&
       this.settings.deviceToken
     ) {
-      await this.startSync();
+      // Obsidian waits for onload before declaring the layout ready. Sync must
+      // start afterward, without making plugin loading depend on network I/O.
+      this.app.workspace.onLayoutReady(() => {
+        if (!this.loaded) return;
+        void this.startSync().catch((error: unknown) => {
+          console.error("Unable to start sync", error);
+          new Notice("Unable to start sync; check the console for details");
+        });
+      });
     }
   }
 

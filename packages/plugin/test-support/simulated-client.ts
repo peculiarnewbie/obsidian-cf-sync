@@ -31,7 +31,7 @@ export class SimulatedClient {
   constructor(readonly settings: PluginSettings) {
     this.state = new LocalState(settings);
     this.app = {
-      workspace: { layoutReady: true },
+      workspace: { layoutReady: true, onLayoutReady: (callback: () => void) => callback() },
       vault: {
         configDir: ".obsidian",
         getFiles: () => [...this.files.values()],

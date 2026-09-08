@@ -153,8 +153,8 @@ After pairing, sync uses the generated device token. The bootstrap API key is on
 
 ## Install a released plugin
 
-Download `obsidian-cf-sync-0.1.0.zip` from the
-[GitHub release](https://github.com/peculiarnewbie/obsidian-cf-sync/releases/tag/0.1.0).
+Download `obsidian-cf-sync-0.1.1.zip` from the
+[GitHub release](https://github.com/peculiarnewbie/obsidian-cf-sync/releases/tag/0.1.1).
 Extract its `obsidian-cf-sync` folder into `<vault>/.obsidian/plugins/`, restart
 Obsidian, and enable **Obsidian CF Sync** under Community plugins. The individual
 `main.js`, `manifest.json`, and `styles.css` assets are also available.

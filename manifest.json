@@ -1,7 +1,7 @@
 {
   "id": "obsidian-cf-sync",
   "name": "Obsidian CF Sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "0.15.0",
   "description": "Sync your Obsidian vault via Cloudflare Workers, Durable Objects, and R2.",
   "author": "peculiarnewbie",

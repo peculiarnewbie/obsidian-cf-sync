@@ -169,7 +169,8 @@ This still needs product polish before production use.
 The engine snapshots its configuration. Settings changes shut down and drain
 the previous engine before creating another; disabling sync stops it. Startup
 waits for layout readiness before inspecting the vault. Remote application
-checks cancellation before filesystem mutations and skips superseded versions.
+checks cancellation before filesystem mutations and skips already-acknowledged versions, including an equal version echoed after
+a local commit. This preserves edits made while that commit was in flight.
 An echoed pending operation acknowledges its snapshot without replacing newer
 local edits. Configuration paths are excluded in both directions.
 

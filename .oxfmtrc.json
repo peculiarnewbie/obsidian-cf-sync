@@ -8,6 +8,7 @@
     ".alchemy/**",
     ".wrangler/**",
     "pnpm-lock.yaml",
-    "skills-lock.json"
+    "skills-lock.json",
+    ".github/workflows/pullfrog.yml"
   ]
 }

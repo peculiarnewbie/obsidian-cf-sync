@@ -315,6 +315,25 @@ describe("two SyncEngines against local Worker / Durable Object / R2", () => {
 });
 
 describe("delayed delivery and recovery regressions", () => {
+  it("does not conflict when typing continues during an acknowledgement and editing switches devices", async () => {
+    const a = await client();
+    const b = await client();
+    a.write("handoff.md", "initial");
+    await converged(a, b);
+    for (let round = 0; round < 4; round++) {
+      const writer = round % 2 === 0 ? a : b;
+      writer.write("handoff.md", `round ${round} typing`);
+      const ack = network.hold(writer.settings.deviceId, "/sync/commit");
+      const sending = writer.sync();
+      await ack.reached;
+      writer.write("handoff.md", `round ${round} finished`);
+      ack.release();
+      await sending;
+      await converged(a, b);
+      expect(a.snapshot()).toEqual({ "handoff.md": `round ${round} finished` });
+    }
+  });
+
   it("catches up after an older change-page response arrives behind a newer server commit", async () => {
     const a = await client();
     const b = await client();
@@ -505,6 +524,48 @@ describe("successors of operations with lost acknowledgements", () => {
 });
 
 describe("plugin lifecycle and idle work", () => {
+  it.each([false, true])(
+    "finishes plugin loading before layout readiness (unloaded: %s)",
+    async (unload) => {
+      const a = await client(false);
+      const b = await client();
+      b.write("startup.md", "download after launch");
+      await b.sync();
+      let ready: (() => void) | undefined;
+      a.app.workspace.layoutReady = false;
+      a.app.workspace.onLayoutReady = (callback) => {
+        ready = callback;
+      };
+      const plugin = new ObsidianCfSyncPlugin(a.app, {
+        id: "obsidian-cf-sync",
+        name: "Sync",
+        version: "test",
+        minAppVersion: "1.0.0",
+        author: "test",
+        description: "test",
+      });
+      plugins.push(plugin);
+      await plugin.saveData(a.settings);
+      const requests = network.requests.length;
+      // Awaiting onload before emitting layout-ready reproduces Obsidian's launch order.
+      await plugin.onload();
+      expect(ready).toBeTypeOf("function");
+      expect(network.requests).toHaveLength(requests);
+      expect(plugin.syncEngine).toBeNull();
+      if (unload) plugin.onunload();
+      a.app.workspace.layoutReady = true;
+      ready!();
+      await plugin.saveSettings();
+      if (unload) {
+        expect(plugin.syncEngine).toBeNull();
+        expect(network.requests).toHaveLength(requests);
+      } else {
+        await plugin.syncEngine?.syncNow();
+        expect(a.snapshot()).toEqual({ "startup.md": "download after launch" });
+      }
+    },
+  );
+
   it("stops on disable, resumes on enable, and keeps the active engine for unchanged sync identity", async () => {
     const a = await client();
     const b = await client();
@@ -520,6 +581,8 @@ describe("plugin lifecycle and idle work", () => {
     plugins.push(plugin);
     await plugin.saveData(a.settings);
     await plugin.onload();
+    await plugin.saveSettings();
+    await plugin.syncEngine?.syncNow();
     const active = plugin.syncEngine;
     expect(active?.active).toBe(true);
     plugin.settings.apiKey = "administrative setting only";
