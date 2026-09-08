@@ -1,0 +1,73 @@
+name: Release Obsidian plugin
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Validate release version
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'));
+          const versions = JSON.parse(readFileSync('versions.json', 'utf8'));
+          if (process.env.GITHUB_REF_NAME !== manifest.version) {
+            throw new Error('Release tag must match manifest.version exactly');
+          }
+          if (versions[manifest.version] !== manifest.minAppVersion) {
+            throw new Error('versions.json must match manifest.minAppVersion');
+          }
+          JS
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm test
+      - run: pnpm package:plugin
+      - name: Publish plugin assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          args=()
+          if [[ "$RELEASE_TAG" == 0.* ]]; then
+            args+=(--prerelease)
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Download the obsidian-cf-sync ZIP asset and extract its plugin folder
+          into <vault>/.obsidian/plugins/. Alternatively, copy the three individual
+          assets into <vault>/.obsidian/plugins/obsidian-cf-sync/. Restart
+          Obsidian, and enable Obsidian CF Sync under Community plugins.
+
+          Configure your Worker URL and vault ID, then pair with your bootstrap key.
+          Use backed-up test vaults while this plugin is in prerelease. Encryption
+          and reconciliation of two independently populated vaults are not implemented.
+          Deploy the compatible Worker before installing an updated plugin.
+          NOTES
+          gh release create "$RELEASE_TAG" --verify-tag \
+            --title "Obsidian CF Sync $RELEASE_TAG" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes \
+            "${args[@]}" \
+            packages/plugin/dist/main.js \
+            packages/plugin/dist/manifest.json \
+            packages/plugin/dist/styles.css \
+            "packages/plugin/dist/obsidian-cf-sync-${RELEASE_TAG}.zip"

@@ -149,6 +149,7 @@ After pairing, sync uses the generated device token. The bootstrap API key is on
 - `docs/api.md`: current HTTP and WebSocket API.
 - `docs/development.md`: development, testing, deployment, and known gaps.
 - `docs/sync-redesign.md`: target synchronization model and staged migration plan.
+- `TODO.md`: immediate priorities: Worker dashboard, researched conflict merging, and initial reconciliation.
 - `PLAN.md`: fuller product plan and intended architecture.
 
 ## Install a released plugin
