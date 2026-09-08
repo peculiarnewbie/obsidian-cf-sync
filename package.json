@@ -16,7 +16,8 @@
     "lint": "oxlint --config oxlint.json .",
     "check": "pnpm fmt:check && pnpm lint && pnpm typecheck",
     "typecheck": "tsc --noEmit -p tsconfig.json && pnpm -r --if-present typecheck",
-    "fmt:check": "oxfmt --check ."
+    "fmt:check": "oxfmt --check .",
+    "package:plugin": "pnpm build:plugin && python3 scripts/package-plugin.py"
   },
   "dependencies": {
     "alchemy": "2.0.0-beta.59",

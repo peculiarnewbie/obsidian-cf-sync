@@ -278,16 +278,19 @@ copies it into `packages/plugin/dist`; `versions.json` maps plugin versions to
 their minimum Obsidian versions.
 
 To release, update the manifest version and the corresponding `versions.json`
-entry, run `pnpm check`, `pnpm test`, and `pnpm build:plugin`, then commit and
+entry, run `pnpm check`, `pnpm test`, and `pnpm package:plugin`, then commit and
 push. Create and push a tag matching the manifest version exactly (no `v`
-prefix). Publish the three individual assets with:
+prefix). Packaging requires Python 3 and includes only the three installable
+files inside an `obsidian-cf-sync/` directory. Publish the ZIP alongside the
+individual assets with:
 
 ```sh
 gh release create 0.1.0 --verify-tag --prerelease \
   --title "Obsidian CF Sync 0.1.0" --notes-file /path/to/release-notes.md \
   packages/plugin/dist/main.js \
   packages/plugin/dist/manifest.json \
-  packages/plugin/dist/styles.css
+  packages/plugin/dist/styles.css \
+  packages/plugin/dist/obsidian-cf-sync-0.1.0.zip
 ```
 
 Replace the example version for subsequent releases. Source maps and deployment

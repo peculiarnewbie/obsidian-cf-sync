@@ -153,10 +153,11 @@ After pairing, sync uses the generated device token. The bootstrap API key is on
 
 ## Install a released plugin
 
-Download `main.js`, `manifest.json`, and `styles.css` from a
-[GitHub release](https://github.com/peculiarnewbie/obsidian-cf-sync/releases).
-Create `<vault>/.obsidian/plugins/obsidian-cf-sync/`, copy the three files there,
-restart Obsidian, and enable **Obsidian CF Sync** under Community plugins.
+Download `obsidian-cf-sync-0.1.0.zip` from the
+[GitHub release](https://github.com/peculiarnewbie/obsidian-cf-sync/releases/tag/0.1.0).
+Extract its `obsidian-cf-sync` folder into `<vault>/.obsidian/plugins/`, restart
+Obsidian, and enable **Obsidian CF Sync** under Community plugins. The individual
+`main.js`, `manifest.json`, and `styles.css` assets are also available.
 Then configure your Worker URL and vault ID, and pair using your bootstrap key.
 
 The initial `0.1.0` release is a prerelease for testing on backed-up vaults.
