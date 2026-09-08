@@ -270,4 +270,25 @@ curl -H "Authorization: Bearer $DEVICE_TOKEN" -H "X-Vault-Id: $VAULT_ID" -H "X-D
 - Add a better approval UX for device enrollment and support token rotation.
 - Add chunk reference count updates and garbage collection.
 - Decide whether chunk downloads should remain proxied or move to signed URLs.
-- Add release packaging for Obsidian community/manual installation.
+
+## Plugin releases
+
+The repository-root `manifest.json` is the canonical plugin manifest. The build
+copies it into `packages/plugin/dist`; `versions.json` maps plugin versions to
+their minimum Obsidian versions.
+
+To release, update the manifest version and the corresponding `versions.json`
+entry, run `pnpm check`, `pnpm test`, and `pnpm build:plugin`, then commit and
+push. Create and push a tag matching the manifest version exactly (no `v`
+prefix). Publish the three individual assets with:
+
+```sh
+gh release create 0.1.0 --verify-tag --prerelease \
+  --title "Obsidian CF Sync 0.1.0" --notes-file /path/to/release-notes.md \
+  packages/plugin/dist/main.js \
+  packages/plugin/dist/manifest.json \
+  packages/plugin/dist/styles.css
+```
+
+Replace the example version for subsequent releases. Source maps and deployment
+credentials are not release assets. Releases do not deploy the Worker.

@@ -47,7 +47,6 @@ Not implemented or incomplete:
 - Conflict UX beyond creating local conflict copies and notices.
 - A user-directed reconciliation flow when a fresh local vault and remote
   vault both already contain files. Sync safely pauses and reports a summary.
-- Release packaging/install automation for Obsidian.
 - Garbage collection for unreferenced R2 chunks.
 - Presigned download/upload URLs. The Worker currently proxies chunk upload and download.
 
@@ -151,3 +150,15 @@ After pairing, sync uses the generated device token. The bootstrap API key is on
 - `docs/development.md`: development, testing, deployment, and known gaps.
 - `docs/sync-redesign.md`: target synchronization model and staged migration plan.
 - `PLAN.md`: fuller product plan and intended architecture.
+
+## Install a released plugin
+
+Download `main.js`, `manifest.json`, and `styles.css` from a
+[GitHub release](https://github.com/peculiarnewbie/obsidian-cf-sync/releases).
+Create `<vault>/.obsidian/plugins/obsidian-cf-sync/`, copy the three files there,
+restart Obsidian, and enable **Obsidian CF Sync** under Community plugins.
+Then configure your Worker URL and vault ID, and pair using your bootstrap key.
+
+The initial `0.1.0` release is a prerelease for testing on backed-up vaults.
+It is not listed in Obsidian's community directory. The GitHub-generated
+source archives are source code, not the installable plugin.

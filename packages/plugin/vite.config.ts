@@ -13,7 +13,7 @@ export default defineConfig({
       name: "copy-obsidian-plugin-assets",
       writeBundle() {
         mkdirSync(outDir, { recursive: true });
-        copyFileSync(resolve(__dirname, "manifest.json"), resolve(outDir, "manifest.json"));
+        copyFileSync(resolve(__dirname, "../../manifest.json"), resolve(outDir, "manifest.json"));
         copyFileSync(resolve(__dirname, "styles.css"), resolve(outDir, "styles.css"));
       },
     },
