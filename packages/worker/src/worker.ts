@@ -86,7 +86,8 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname === "/admin/dashboard" && request.method === "GET") {
-    if (!checkBootstrapAuth(request, env)) return new Response("Unauthorized", { status: 401 });
+    if (url.searchParams.has("token") || !checkBootstrapAuth(request, env))
+      return new Response("Unauthorized", { status: 401 });
     return Response.json(await env.VaultDO.getByName(context.data.vaultId).dashboard(), {
       headers: { "Cache-Control": "no-store" },
     });

@@ -656,7 +656,7 @@ export class SyncEngine {
     if (!prepareResp.success) {
       new Notice(`Sync conflict on ${op.path}`);
       await this.createConflictCopy(op.path, await this.pendingContent(op));
-      await this.pullFile(op.path);
+      await this.pullFile(op.path, op.chunks);
       return "conflict";
     }
 
@@ -672,7 +672,7 @@ export class SyncEngine {
       if (!commitResp.success) {
         new Notice(`Sync conflict on ${op.path}`);
         await this.createConflictCopy(op.path, await this.pendingContent(op));
-        await this.pullFile(op.path);
+        await this.pullFile(op.path, op.chunks);
         return "conflict";
       }
 
@@ -699,7 +699,7 @@ export class SyncEngine {
     return "committed";
   }
 
-  private async pullFile(path: string): Promise<void> {
+  private async pullFile(path: string, preservedChunks?: readonly string[]): Promise<void> {
     const response = await this.apiCall(
       FileStateResponseSchema,
       "GET",
@@ -708,17 +708,20 @@ export class SyncEngine {
     if (!response.file)
       throw new Error(`No canonical state returned for conflicting path: ${path}`);
     if (response.file.deleted) await this.applyDelete(response.file);
-    else await this.applyFileEntry(response.file);
+    else await this.applyFileEntry(response.file, preservedChunks);
   }
 
-  private async applyFileEntry(fileEntry: {
-    path: string;
-    opId?: string;
-    chunks: readonly string[];
-    mtime: number;
-    fileVersion: number;
-    globalVersion: number;
-  }): Promise<void> {
+  private async applyFileEntry(
+    fileEntry: {
+      path: string;
+      opId?: string;
+      chunks: readonly string[];
+      mtime: number;
+      fileVersion: number;
+      globalVersion: number;
+    },
+    preservedChunks?: readonly string[],
+  ): Promise<void> {
     if (!this.isSyncablePath(fileEntry.path)) return;
     const known = await this.localState.getFile(fileEntry.path);
     // Acknowledged versions are already our baseline. Replaying an equal
@@ -757,11 +760,16 @@ export class SyncEngine {
     }
 
     this.abortController?.signal.throwIfAborted();
+    let superseded: string[] = [];
     this.applyingRemote = true;
     try {
       const existing = this.app.vault.getAbstractFileByPath(fileEntry.path);
       if (existing instanceof TFile) {
-        await this.preserveAndRecheckBeforeRemoteReplace(existing, fileEntry.path);
+        superseded = await this.preserveAndRecheckBeforeRemoteReplace(
+          existing,
+          fileEntry.path,
+          preservedChunks,
+        );
         if (this.app.vault.getAbstractFileByPath(fileEntry.path) !== existing) {
           throw new Error(`Local file changed while applying remote update: ${fileEntry.path}`);
         }
@@ -784,6 +792,9 @@ export class SyncEngine {
       globalVersion: fileEntry.globalVersion,
       deleted: false,
     });
+    // Only retire unsent creations after canonical content and metadata are durable.
+    // Attempted operations must still resolve through server idempotency checks.
+    for (const opId of superseded) await this.localState.removePendingOp(opId);
   }
 
   private async catchUp(): Promise<void> {
@@ -1058,16 +1069,39 @@ export class SyncEngine {
     }
   }
 
-  private async preserveAndRecheckBeforeRemoteReplace(file: TFile, path: string): Promise<void> {
+  private async preserveAndRecheckBeforeRemoteReplace(
+    file: TFile,
+    path: string,
+    preservedChunks?: readonly string[],
+  ): Promise<string[]> {
     const localEntry = await this.localState.getFile(path);
-    if (!localEntry) {
+    const creations = localEntry
+      ? []
+      : (await this.localState.getPendingOps()).filter(
+          (op) => op.action === "put" && op.path === path && op.baseFileVersion === 0,
+        );
+    if (!localEntry && creations.length === 0) {
       throw new Error(`Refusing to overwrite untracked local file: ${path}`);
     }
 
     const currentContent = await this.app.vault.readBinary(file);
     const currentChunks = (await this.chunkData(currentContent)).map((chunk) => chunk.hash);
-    if (!this.arraysEqual(localEntry.chunks, currentChunks)) {
+    const preserved = preservedChunks ? [Array.from(preservedChunks)] : [];
+    if (
+      (!localEntry || !this.arraysEqual(localEntry.chunks, currentChunks)) &&
+      !preserved.some((hashes) => this.arraysEqual(hashes, currentChunks))
+    ) {
       await this.createConflictCopy(path, currentContent);
+      preserved.push(currentChunks);
+    }
+    const superseded = creations.filter((op) => !op.attempted);
+    // A queued snapshot may differ from the live file if editing continued.
+    // Preserve both before retiring an unsent creation that lost the path race.
+    for (const op of superseded) {
+      if (!preserved.some((hashes) => this.arraysEqual(hashes, op.chunks))) {
+        await this.createConflictCopy(path, await this.pendingContent(op));
+        preserved.push(op.chunks);
+      }
     }
 
     const recheckedContent = await this.app.vault.readBinary(file);
@@ -1075,6 +1109,7 @@ export class SyncEngine {
     if (!this.arraysEqual(currentChunks, recheckedChunks)) {
       throw new Error(`Local file changed while preparing remote replacement: ${path}`);
     }
+    return superseded.map((op) => op.opId);
   }
 
   private async chunkData(data: ArrayBuffer): Promise<{ hash: string; data: ArrayBuffer }[]> {

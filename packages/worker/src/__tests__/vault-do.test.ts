@@ -1129,6 +1129,15 @@ describe("dashboard and progress reporting", () => {
     expect(html).not.toContain(API_KEY);
     const vault = "dashboard-access";
     const token = await enrollDevice(vault);
+    for (const authorization of [undefined, `Bearer ${API_KEY}`]) {
+      const headers = new Headers({ "X-Vault-Id": vault });
+      if (authorization) headers.set("Authorization", authorization);
+      const response = await worker.fetch(
+        new Request(`https://sync.test/admin/dashboard?token=${API_KEY}`, { headers }),
+        workerEnv(),
+      );
+      expect(response.status).toBe(401);
+    }
     for (const credential of ["wrong", token]) {
       const response = await worker.fetch(
         request("/admin/dashboard", {}, vault, credential),

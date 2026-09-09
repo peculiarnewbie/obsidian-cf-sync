@@ -318,7 +318,8 @@ coordinator; pong messages do not initiate replication.
 
 `GET /` and `GET /dashboard` serve a login shell containing no vault data.
 `GET /admin/dashboard` requires the bootstrap key in `Authorization: Bearer …`
-and a valid `X-Vault-Id`. Device tokens cannot access this endpoint. Responses
+and a valid `X-Vault-Id`. Requests containing a `token` query parameter are
+rejected, even with a valid header. Device tokens cannot access this endpoint. Responses
 are marked `Cache-Control: no-store` and never include credentials or token hashes.
 
 The response contains `globalVersion`, active `fileCount`, logical `fileBytes`,
