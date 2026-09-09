@@ -1,5 +1,8 @@
+import { dashboardResponse } from "./dashboard";
 import { DurableObject } from "cloudflare:workers";
 import {
+  DeviceProgressRequest as DeviceProgressRequestSchema,
+  type DeviceProgressRequest,
   ChunkHash as ChunkHashSchema,
   FilePath as FilePathSchema,
   type FilePath,
@@ -62,6 +65,9 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     return new Response(null, { status: 204, headers: corsHeaders() });
   }
 
+  if ((url.pathname === "/" || url.pathname === "/dashboard") && request.method === "GET")
+    return dashboardResponse();
+
   const context = getRpcContext(request);
   if (!context.ok) return errorResponse({ error: context.error, code: "INVALID_VAULT_ID" });
 
@@ -79,9 +85,27 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     return await handleRevokeDevice(env, context.data, validated.data);
   }
 
+  if (url.pathname === "/admin/dashboard" && request.method === "GET") {
+    if (url.searchParams.has("token") || !checkBootstrapAuth(request, env))
+      return new Response("Unauthorized", { status: 401 });
+    return Response.json(await env.VaultDO.getByName(context.data.vaultId).dashboard(), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
   const deviceAuth = await getDeviceAuthContext(request, env, context.data);
   if (!deviceAuth.ok) return new Response("Unauthorized", { status: 401 });
   const authenticatedContext = deviceAuth.data;
+
+  if (url.pathname === "/sync/status" && request.method === "POST") {
+    const progress = decodeRequest(DeviceProgressRequestSchema, await readJson(request));
+    if (!progress.ok) return errorResponse(progress);
+    const result = await env.VaultDO.getByName(context.data.vaultId).reportProgress({
+      ...progress.data,
+      deviceId: authenticatedContext.deviceId!,
+    });
+    return Response.json(result, { status: result.success ? 200 : 400 });
+  }
 
   if (url.pathname.startsWith("/sync/ws")) {
     return handleWebSocket(request, env, authenticatedContext);
@@ -537,6 +561,9 @@ export class VaultDO extends DurableObject<Env> {
     `);
     this.addColumnIfMissing("devices", "token_hash", "TEXT");
     this.addColumnIfMissing("devices", "enrolled_at", "INTEGER");
+    this.addColumnIfMissing("devices", "reported_at", "INTEGER");
+    this.addColumnIfMissing("devices", "pending_operations", "INTEGER");
+    this.addColumnIfMissing("devices", "sync_state", "TEXT");
     this.addColumnIfMissing("changes", "old_file_version", "INTEGER");
   }
 
@@ -621,6 +648,73 @@ export class VaultDO extends DurableObject<Env> {
     }
 
     return { valid };
+  }
+
+  async reportProgress(body: DeviceProgressRequest & { deviceId: string }) {
+    if (body.globalVersion > this.getGlobalVersion()) {
+      return {
+        success: false,
+        code: "FUTURE_CURSOR",
+        error: "Reported cursor exceeds the vault version",
+      };
+    }
+    this.sql.exec(
+      `UPDATE devices SET last_sync_version = ?, pending_operations = ?, sync_state = ?, reported_at = ?
+      WHERE device_id = ? AND revoked = 0`,
+      body.globalVersion,
+      body.pendingOperations,
+      body.state,
+      Date.now(),
+      body.deviceId,
+    );
+    return { success: true };
+  }
+
+  async dashboard() {
+    const files = this.queryOne(
+      "SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes FROM files WHERE deleted = 0",
+    )!;
+    const devices = this.sql
+      .exec(
+        "SELECT device_id, name, platform, enrolled_at, last_seen, revoked, reported_at, last_sync_version, pending_operations, sync_state FROM devices ORDER BY last_seen DESC, device_id LIMIT 200",
+      )
+      .toArray();
+    return {
+      globalVersion: this.getGlobalVersion(),
+      fileCount: Number(files.count),
+      fileBytes: Number(files.bytes),
+      registeredChunkBytes: Number(
+        this.queryOne("SELECT COALESCE(SUM(size), 0) AS bytes FROM chunks")!.bytes,
+      ),
+      deviceCount: Number(this.queryOne("SELECT COUNT(*) AS count FROM devices")!.count),
+      unresolvedConflictCount: Number(
+        this.queryOne("SELECT COUNT(*) AS count FROM conflicts WHERE resolved = 0")!.count,
+      ),
+      devices: devices.map((row) => ({
+        deviceId: String(row.device_id),
+        name: String(row.name),
+        platform: String(row.platform),
+        enrolledAt: row.enrolled_at == null ? null : Number(row.enrolled_at),
+        lastSeen: Number(row.last_seen),
+        revoked: Number(row.revoked) !== 0,
+        connected: this.ctx.getWebSockets(String(row.device_id)).length > 0,
+        reportedAt: row.reported_at == null ? null : Number(row.reported_at),
+        reportedVersion: row.reported_at == null ? null : Number(row.last_sync_version),
+        pendingOperations: row.pending_operations == null ? null : Number(row.pending_operations),
+        state: row.sync_state == null ? null : String(row.sync_state),
+      })),
+      conflicts: this.sql
+        .exec(
+          "SELECT conflict_id, path, losing_device_id, created_at FROM conflicts WHERE resolved = 0 ORDER BY created_at DESC LIMIT 50",
+        )
+        .toArray()
+        .map((row) => ({
+          id: String(row.conflict_id),
+          path: String(row.path),
+          deviceId: String(row.losing_device_id),
+          createdAt: Number(row.created_at),
+        })),
+    };
   }
 
   async prepare(body: PrepareRequest) {

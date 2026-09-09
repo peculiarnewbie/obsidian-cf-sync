@@ -98,13 +98,14 @@ Tests live in `packages/worker/src/__tests__/vault-do.test.ts` and cover:
 Plugin tests cover scoped local-state storage, durable pending-operation
 snapshots, retrying an upload after its live file is unavailable, and WebSocket
 lifecycle safety. They also cover remote-only and local-only first sync, the
-both-populated safety pause, and rejection of remote writes to unknown local
+differing-path safety pause, and rejection of remote writes to unknown local
 files.
 
 ## Simulated-client end-to-end tests
 
-Run `pnpm test:e2e` for `packages/worker/src/__tests__/sync-e2e.test.ts`.
-The suite also runs as part of `pnpm test`.
+Run `pnpm test:e2e` for `packages/worker/src/__tests__/sync-e2e*.test.ts`.
+The suite also runs as part of `pnpm test`. Scenarios are grouped into separate
+Workers test runtimes to bound accumulated simulated-client state.
 
 Two real `SyncEngine` instances use independent in-memory Obsidian vaults,
 real file event callbacks, and separate scoped databases backed by
@@ -295,3 +296,24 @@ gh release create 0.1.0 --verify-tag --prerelease \
 
 Replace the example version for subsequent releases. Source maps and deployment
 credentials are not release assets. Releases do not deploy the Worker.
+
+## Dashboard development and browser tests
+
+The browser source is `packages/worker/src/dashboard-client.ts`; the Worker
+serves its HTML shell from `dashboard.ts`. Run `pnpm build:dashboard` after
+editing browser code and commit `dashboard-script.generated.ts`. A separate
+browser bundle prevents the Worker's bundler from injecting helpers that do
+not exist in the page. `pnpm check` checks browser types and rejects a stale
+bundle. No external scripts, fonts, or third-party requests are needed.
+
+```sh
+pnpm exec playwright install chromium
+pnpm test:dashboard
+```
+
+The browser test starts a local Wrangler Worker using
+`tests/dashboard.wrangler.json`, an explicit test-only pairing key, and local
+DO/SQLite/R2 storage. Loading `.env` secrets is disabled for this server. It
+checks authentication, progress rendering, clipboard copying, device revocation,
+locking, hostile device-name rendering, and mobile overflow. Screenshots are
+written to ignored `test-results/` output. No production credentials are needed.

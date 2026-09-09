@@ -1,5 +1,8 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import {
+  DashboardResponse,
+  DeviceProgressRequest,
+  DeviceProgressResponse,
   ChangesQuery,
   ChangesResponse,
   ChunkParams,
@@ -22,6 +25,15 @@ import {
 
 export const SyncApi = HttpApi.make("ObsidianCfSyncApi").add(
   HttpApiGroup.make("sync", { topLevel: true }).add(
+    HttpApiEndpoint.get("dashboard", "/admin/dashboard", {
+      headers: SyncRequestHeaders,
+      success: DashboardResponse,
+    }),
+    HttpApiEndpoint.post("reportProgress", "/sync/status", {
+      headers: DeviceAuthHeaders,
+      payload: DeviceProgressRequest,
+      success: DeviceProgressResponse,
+    }),
     HttpApiEndpoint.post("prepare", "/sync/prepare", {
       headers: DeviceAuthHeaders,
       payload: PrepareRequest,

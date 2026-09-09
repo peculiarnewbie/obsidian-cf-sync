@@ -11,13 +11,16 @@
     "dev:plugin": "pnpm --filter plugin dev",
     "build:plugin": "pnpm --filter plugin build",
     "test": "pnpm --filter worker test && pnpm --filter plugin test",
-    "test:e2e": "pnpm --filter worker exec vitest run src/__tests__/sync-e2e.test.ts",
+    "test:e2e": "pnpm --filter worker exec vitest run sync-e2e",
     "fmt": "oxfmt --write .",
     "lint": "oxlint --config oxlint.json .",
-    "check": "pnpm fmt:check && pnpm lint && pnpm typecheck",
-    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm -r --if-present typecheck",
+    "check": "pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm check:dashboard",
+    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm -r --if-present typecheck && tsc --noEmit -p tsconfig.browser.json",
     "fmt:check": "oxfmt --check .",
-    "package:plugin": "pnpm build:plugin && python3 scripts/package-plugin.py"
+    "package:plugin": "pnpm build:plugin && python3 scripts/package-plugin.py",
+    "test:dashboard": "playwright test",
+    "build:dashboard": "node scripts/build-dashboard.mjs",
+    "check:dashboard": "node scripts/build-dashboard.mjs --check"
   },
   "dependencies": {
     "alchemy": "2.0.0-beta.59",
@@ -27,11 +30,14 @@
     "@cloudflare/workers-types": "^4.20260523.1",
     "@effect/platform-node": "4.0.0-beta.92",
     "@effect/vitest": "4.0.0-beta.92",
+    "@playwright/test": "1.63.0",
+    "esbuild": "0.27.3",
     "oxfmt": "0.67.0",
     "oxlint": "1.82.0",
     "typescript": "7.0.2",
     "vite": "8.2.2",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "wrangler": "4.94.0"
   },
   "packageManager": "pnpm@10.33.0",
   "pnpm": {

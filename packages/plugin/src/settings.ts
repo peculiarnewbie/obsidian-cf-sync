@@ -97,6 +97,27 @@ export class SyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Sync status")
+      .setDesc(
+        this.plugin.syncEngine?.status ??
+          (this.plugin.settings.deviceToken ? "Paired; sync has not started" : "Not paired"),
+      );
+    if (this.plugin.syncEngine?.needsReconciliation) {
+      containerEl.createEl("p", {
+        text: "These paths differ from the server. Rename the local files to keep both versions, or make their contents match, then retry. No initial files have been overwritten.",
+      });
+      const paths = containerEl.createEl("ul");
+      for (const path of this.plugin.syncEngine.reconciliationPaths)
+        paths.createEl("li", { text: path });
+      new Setting(containerEl).setName("Continue initial sync").addButton((button) =>
+        button.setButtonText("Retry initial sync").onClick(async () => {
+          await this.plugin.retryInitialSync();
+          this.display();
+        }),
+      );
+    }
+
+    new Setting(containerEl)
       .setName("Sync enabled")
       .setDesc("Enable automatic vault synchronization")
       .addToggle((toggle) =>

@@ -1,0 +1,10 @@
+{
+  "name": "cfsync-dashboard-browser-test",
+  "main": "../packages/worker/src/worker.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "SYNC_API_KEY": "dashboard-browser-test-only" },
+  "r2_buckets": [{ "binding": "CHUNKS_BUCKET", "bucket_name": "dashboard-browser-test" }],
+  "durable_objects": { "bindings": [{ "name": "VaultDO", "class_name": "VaultDO" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDO"] }]
+}

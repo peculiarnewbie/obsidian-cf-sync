@@ -270,3 +270,48 @@ export const RevokeDeviceResponse = Schema.Struct({
 export type RevokeDeviceResponse = Schema.Schema.Type<typeof RevokeDeviceResponse>;
 
 export const decodeUnknownSync = Schema.decodeUnknownSync;
+
+const Count = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const DeviceProgressRequest = Schema.Struct({
+  globalVersion: GlobalVersion,
+  pendingOperations: Count,
+  state: Schema.Literals(["active", "initializing", "needs-review", "error"]),
+});
+export type DeviceProgressRequest = Schema.Schema.Type<typeof DeviceProgressRequest>;
+export const DeviceProgressResponse = Schema.Struct({ success: Schema.Literal(true) });
+export const DashboardResponse = Schema.Struct({
+  globalVersion: GlobalVersion,
+  fileCount: Count,
+  fileBytes: Count,
+  registeredChunkBytes: Count,
+  deviceCount: Count,
+  unresolvedConflictCount: Count,
+  devices: Schema.Array(
+    Schema.Struct({
+      deviceId: DeviceId,
+      name: Schema.String,
+      platform: Schema.String,
+      enrolledAt: Schema.NullOr(Schema.Number),
+      lastSeen: Schema.Number,
+      revoked: Schema.Boolean,
+      connected: Schema.Boolean,
+      reportedAt: Schema.NullOr(Schema.Number),
+      reportedVersion: Schema.NullOr(GlobalVersion),
+      pendingOperations: Schema.NullOr(Count),
+      state: Schema.NullOr(DeviceProgressRequest.fields.state),
+    }),
+  ),
+  conflicts: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      path: FilePath,
+      deviceId: DeviceId,
+      createdAt: Schema.Number,
+    }),
+  ),
+});
+export type DashboardResponse = Schema.Schema.Type<typeof DashboardResponse>;

@@ -180,7 +180,7 @@ describe("SyncEngine initial reconciliation", () => {
       vi.fn().mockResolvedValue(Response.json({ files: [], globalVersion: 0 })),
     );
 
-    await expect(harness.bootstrapFreshScope()).resolves.toEqual({ kind: "empty" });
+    await expect(harness.bootstrapFreshScope()).resolves.toEqual({ kind: "ready" });
     expect(await harness.localState.hasSyncState()).toBe(true);
     expect(await harness.localState.getPendingOps()).toEqual([]);
   });
@@ -213,8 +213,7 @@ describe("SyncEngine initial reconciliation", () => {
     );
 
     await expect(harness.bootstrapFreshScope()).resolves.toMatchObject({
-      kind: "remote-only",
-      remoteFiles: 1,
+      kind: "ready",
     });
     expect(files.map((file) => file.path)).toEqual(["remote.md"]);
     expect(await harness.localState.getSyncState()).toMatchObject({ globalVersion: 1 });
@@ -234,8 +233,7 @@ describe("SyncEngine initial reconciliation", () => {
     );
 
     await expect(harness.bootstrapFreshScope()).resolves.toMatchObject({
-      kind: "local-only",
-      localFiles: 1,
+      kind: "ready",
     });
     expect(await harness.localState.getPendingOps()).toEqual([
       expect.objectContaining({ action: "put", path: "local.md" }),
@@ -271,8 +269,8 @@ describe("SyncEngine initial reconciliation", () => {
     );
 
     await expect(harness.bootstrapFreshScope()).resolves.toMatchObject({
-      kind: "both-populated",
-      conflictingPaths: 1,
+      kind: "needs-review",
+      paths: ["shared.md"],
     });
     expect(await harness.localState.hasSyncState()).toBe(false);
     expect(await harness.localState.getPendingOps()).toEqual([]);
