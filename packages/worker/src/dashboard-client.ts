@@ -1,9 +1,8 @@
-import type { DashboardResponse } from "@obsidian-cf-sync/protocol";
+import type { DashboardResponse, PairingKeyResponse } from "@obsidian-cf-sync/protocol";
 
 function dashboardClient() {
   const element = (id: string) => document.getElementById(id)!;
-  const form = element("unlock") as HTMLFormElement;
-  const keyInput = element("key") as HTMLInputElement;
+  const form = element("select-vault") as HTMLFormElement;
   const vaultInput = element("vault") as HTMLInputElement;
   const message = element("message");
   let credentials: { key: string; vault: string } | undefined;
@@ -24,7 +23,7 @@ function dashboardClient() {
         ? `${(value / 1024).toFixed(1)} KiB`
         : `${(value / 1024 / 1024).toFixed(1)} MiB`;
   async function api<T = unknown>(path: string, body?: unknown): Promise<T> {
-    if (!credentials) throw new Error("Unlock the dashboard first");
+    if (!credentials) throw new Error("Dashboard is still loading");
     const response = await fetch(path, {
       method: body === undefined ? "GET" : "POST",
       headers: {
@@ -43,29 +42,6 @@ function dashboardClient() {
       );
     return (await response.json()) as T;
   }
-  function lock() {
-    generation++;
-    controller.abort();
-    controller = new AbortController();
-    credentials = undefined;
-    pending = false;
-    keyInput.value = "";
-    element("dashboard").hidden = true;
-    form.hidden = false;
-    element("devices").replaceChildren();
-    element("conflicts").replaceChildren();
-    for (const id of [
-      "files",
-      "file-bytes",
-      "chunk-bytes",
-      "conflict-count",
-      "version",
-      "vault-name",
-      "updated",
-    ])
-      element(id).textContent = "";
-    message.textContent = "Dashboard locked";
-  }
   async function refresh() {
     if (!credentials || pending) return;
     pending = true;
@@ -73,7 +49,6 @@ function dashboardClient() {
     try {
       const data: DashboardResponse = await api<DashboardResponse>("/admin/dashboard");
       if (current !== generation) return;
-      form.hidden = true;
       element("dashboard").hidden = false;
       element("vault-name").textContent = credentials.vault;
       element("files").textContent = data.fileCount.toLocaleString();
@@ -163,21 +138,34 @@ function dashboardClient() {
       if (current === generation) pending = false;
     }
   }
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
+  async function openVault() {
     generation++;
+    const current = generation;
     controller.abort();
     controller = new AbortController();
     pending = false;
-    credentials = { key: keyInput.value.trim(), vault: vaultInput.value.trim() };
-    keyInput.value = "";
-    message.textContent = "Connecting…";
-    void refresh();
+    credentials = undefined;
+    element("dashboard").hidden = true;
+    message.textContent = "Loading dashboard…";
+    try {
+      const response = await fetch("/admin/pairing-key", { signal: controller.signal });
+      if (!response.ok) throw new Error(`Could not load pairing key (${response.status})`);
+      const { key } = (await response.json()) as PairingKeyResponse;
+      if (current !== generation) return;
+      credentials = { key, vault: vaultInput.value.trim() || "default" };
+      await refresh();
+    } catch (error) {
+      if (current === generation)
+        message.textContent = error instanceof Error ? error.message : "Could not load dashboard";
+    }
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void openVault();
   });
   element("refresh").addEventListener("click", () => {
     void refresh();
   });
-  element("lock").addEventListener("click", lock);
   element("copy-key").addEventListener("click", async () => {
     if (!credentials) return;
     const current = generation;
@@ -193,6 +181,7 @@ function dashboardClient() {
   setInterval(() => {
     if (!element("dashboard").hidden) void refresh();
   }, 15_000);
+  void openVault();
 }
 
 dashboardClient();

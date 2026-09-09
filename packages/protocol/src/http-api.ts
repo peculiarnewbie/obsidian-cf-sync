@@ -1,6 +1,7 @@
 import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import {
   DashboardResponse,
+  PairingKeyResponse,
   DeviceProgressRequest,
   DeviceProgressResponse,
   ChangesQuery,
@@ -25,6 +26,9 @@ import {
 
 export const SyncApi = HttpApi.make("ObsidianCfSyncApi").add(
   HttpApiGroup.make("sync", { topLevel: true }).add(
+    HttpApiEndpoint.get("pairingKey", "/admin/pairing-key", {
+      success: PairingKeyResponse,
+    }),
     HttpApiEndpoint.get("dashboard", "/admin/dashboard", {
       headers: SyncRequestHeaders,
       success: DashboardResponse,

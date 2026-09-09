@@ -314,6 +314,6 @@ pnpm test:dashboard
 The browser test starts a local Wrangler Worker using
 `tests/dashboard.wrangler.json`, an explicit test-only pairing key, and local
 DO/SQLite/R2 storage. Loading `.env` secrets is disabled for this server. It
-checks authentication, progress rendering, clipboard copying, device revocation,
-locking, hostile device-name rendering, and mobile overflow. Screenshots are
+checks automatic opening without a supplied key, progress rendering, clipboard copying,
+device revocation, hostile device-name rendering, and mobile overflow. Screenshots are
 written to ignored `test-results/` output. No production credentials are needed.

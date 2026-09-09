@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 const key = "dashboard-browser-test-only";
 
-test("dashboard authenticates, copies the pairing key, renders safely, and revokes a device", async ({
+test("dashboard opens without a key, copies the Worker pairing key, and revokes a device", async ({
   page,
   request,
   context,
@@ -22,12 +22,13 @@ test("dashboard authenticates, copies the pairing key, renders safely, and revok
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/");
   expect(errors).toEqual([]);
+  await expect(page.getByRole("heading", { name: "default", exact: true })).toBeVisible();
+  await expect(page.locator('input[type="password"]')).toHaveCount(0);
+  await page.getByRole("button", { name: "Copy pairing key" }).click();
+  await expect(page.getByRole("status")).toHaveText("Pairing key copied");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(key);
   await page.getByLabel("Vault ID", { exact: true }).fill(vault);
-  await page.getByLabel("Pairing key", { exact: true }).fill("wrong");
-  await page.getByRole("button", { name: "Unlock dashboard" }).click();
-  await expect(page.getByRole("status")).toHaveText("Pairing key not accepted");
-  await page.getByLabel("Pairing key", { exact: true }).fill(key);
-  await page.getByRole("button", { name: "Unlock dashboard" }).click();
+  await page.getByRole("button", { name: "Open vault" }).click();
   await expect(page.getByRole("heading", { name: vault, exact: true })).toBeVisible();
   await expect(page.getByText(name, { exact: true })).toBeVisible();
   await expect(page.getByText("No progress report", { exact: true })).toBeVisible();
@@ -59,8 +60,7 @@ test("dashboard authenticates, copies the pairing key, renders safely, and revok
     headers: { ...headers, Authorization: `Bearer ${deviceToken}`, "X-Device-Id": device },
   });
   expect(rejected.status()).toBe(401);
-  await page.getByRole("button", { name: "Lock dashboard" }).click();
-  await expect(page.getByRole("button", { name: "Unlock dashboard" })).toBeVisible();
-  await expect(page.getByText(name, { exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "default", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });

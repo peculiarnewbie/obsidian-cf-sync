@@ -445,6 +445,7 @@ describe("Worker sync HTTP routes", () => {
       "enrollDevice",
       "file",
       "index",
+      "pairingKey",
       "prepare",
       "reportProgress",
       "revokeDevice",
@@ -1119,7 +1120,16 @@ describe("sync hardening", () => {
 });
 
 describe("dashboard and progress reporting", () => {
-  it("serves a public login shell without data or credentials and protects admin data", async () => {
+  it("provides the pairing key without login for the testing dashboard", async () => {
+    const response = await worker.fetch(
+      new Request("https://sync.test/admin/pairing-key"),
+      workerEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ key: API_KEY });
+  });
+  it("serves a dashboard shell without embedded credentials and validates admin headers", async () => {
     const page = await worker.fetch(new Request("https://sync.test/"), workerEnv());
     expect(page.status).toBe(200);
     expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");

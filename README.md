@@ -167,12 +167,13 @@ source archives are source code, not the installable plugin.
 
 ## Worker dashboard
 
-Open your Worker URL in a browser and enter your vault ID and bootstrap pairing
-key. The dashboard lists device access, last server activity, device-reported
+Open your Worker URL in a browser. The default vault loads automatically;
+use the vault selector to view another vault. The dashboard lists device access, last server activity, device-reported
 progress, file counts, storage summaries, and recorded unresolved conflicts.
 Use **Copy pairing key** to pair another device or **Revoke** to disconnect one.
-The key stays in page memory; **Lock dashboard** clears it. Closing the page
-also clears it. Older plugins show no progress report until updated.
+The dashboard retrieves the pairing key from the Worker, so no existing key or
+login is required. Dashboard authentication is deferred during testing.
+Older plugins show no progress report until updated.
 
 On first sync, identical files are adopted without re-uploading, local-only
 files are uploaded, and remote-only files are downloaded. If shared paths have

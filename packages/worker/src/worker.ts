@@ -68,6 +68,12 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
   if ((url.pathname === "/" || url.pathname === "/dashboard") && request.method === "GET")
     return dashboardResponse();
 
+  // Dashboard authentication is intentionally deferred during testing.
+  if (url.pathname === "/admin/pairing-key" && request.method === "GET") {
+    const key = typeof env.SYNC_API_KEY === "string" ? env.SYNC_API_KEY : env.SYNC_API_KEY.get();
+    return Response.json({ key }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   const context = getRpcContext(request);
   if (!context.ok) return errorResponse({ error: context.error, code: "INVALID_VAULT_ID" });
 

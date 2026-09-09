@@ -182,10 +182,11 @@ active. This reduces idle work while retaining a fallback for missed events.
 
 ## Dashboard
 
-The Worker serves an HTML login shell and an authenticated vault dashboard.
-Bootstrap-key authorization protects administration; device tokens are limited
-to synchronization and their own progress reports. The pairing-key copy button
-uses the key already held in page memory and does not fetch Worker secrets.
+The Worker serves a dashboard that opens automatically without login during testing.
+It fetches the bootstrap key from the public `/admin/pairing-key` endpoint for
+copying and admin API requests. Dashboard authentication is deferred; the key
+is currently available to anyone who can reach the Worker. Device tokens remain
+scoped to synchronization and their own progress reports.
 
 Progress reports carry the client's applied cursor, queued-operation count, and
 state. They are best effort, bounded by a five-second timeout, and stored

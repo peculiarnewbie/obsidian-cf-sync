@@ -283,6 +283,8 @@ export const DeviceProgressRequest = Schema.Struct({
 });
 export type DeviceProgressRequest = Schema.Schema.Type<typeof DeviceProgressRequest>;
 export const DeviceProgressResponse = Schema.Struct({ success: Schema.Literal(true) });
+export const PairingKeyResponse = Schema.Struct({ key: Schema.String });
+export type PairingKeyResponse = Schema.Schema.Type<typeof PairingKeyResponse>;
 export const DashboardResponse = Schema.Struct({
   globalVersion: GlobalVersion,
   fileCount: Count,

@@ -4,7 +4,8 @@ Priorities, in order. Checked items are implemented on this branch; merge resear
 
 ## 1. Worker frontend / dashboard
 
-- [x] Add an authenticated dashboard served by the Worker.
+- [x] Add a dashboard served by the Worker.
+- [ ] Add dashboard authentication after testing; the dashboard and pairing-key retrieval are currently public.
 - [x] List paired devices, allow revoking access, and copy the pairing key.
 - [x] Show last activity and sync progress, distinguishing device-reported progress from server activity.
 - [x] Show vault file counts, storage usage, and unresolved conflicts.

@@ -1,6 +1,7 @@
 # API
 
-All current HTTP endpoints require authentication and a vault ID.
+Sync and device-management HTTP endpoints require authentication and a vault ID.
+The dashboard shell and pairing-key endpoint are public during testing.
 
 Bootstrap authentication for device management:
 
@@ -316,7 +317,9 @@ coordinator; pong messages do not initiate replication.
 
 ## Dashboard and device progress
 
-`GET /` and `GET /dashboard` serve a login shell containing no vault data.
+`GET /` and `GET /dashboard` serve a dashboard shell that opens the default vault automatically.
+`GET /admin/pairing-key` returns `{ "key": "<SYNC_API_KEY>" }` without authentication
+or a vault ID during testing. Its response is marked `Cache-Control: no-store`.
 `GET /admin/dashboard` requires the bootstrap key in `Authorization: Bearer …`
 and a valid `X-Vault-Id`. Requests containing a `token` query parameter are
 rejected, even with a valid header. Device tokens cannot access this endpoint. Responses
@@ -351,7 +354,8 @@ currently online or caught up. Reporting failures never advance the local
 cursor or prevent content synchronization.
 
 The dashboard's **Revoke** action uses the existing `POST /devices/revoke` route.
-**Copy pairing key** copies the key entered at login from page memory; there is
-no endpoint that reveals the Worker secret. The key is not stored in cookies,
+**Copy pairing key** copies the key fetched from `/admin/pairing-key`. Dashboard
+authentication is deferred during testing; anyone with access to the Worker can
+retrieve this key and use the admin APIs. The key is not stored in cookies,
 local storage, session storage, or URLs. Deploy the Worker before upgrading
 plugins to see progress; older Workers safely ignore failed progress requests.
