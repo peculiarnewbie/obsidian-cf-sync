@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   test: {
+    // Each scenario group gets a fresh runtime without competing workerd processes.
+    fileParallelism: false,
     // Real Worker/SQLite/R2 round trips need headroom on shared CI hosts.
     testTimeout: 30_000,
   },

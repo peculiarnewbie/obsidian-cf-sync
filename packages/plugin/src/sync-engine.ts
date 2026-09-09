@@ -558,11 +558,14 @@ export class SyncEngine {
 
   private async reportProgress(state: DeviceProgressRequest["state"]): Promise<void> {
     if (this.abortController?.signal.aborted) return;
+    const parentSignal = this.abortController?.signal;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, 5_000);
     try {
       const cursor = await this.localState.getSyncState();
       const pending = await this.localState.getPendingOps();
-      const signals = [AbortSignal.timeout(5_000)];
-      if (this.abortController) signals.push(this.abortController.signal);
       await this.apiCall(
         DeviceProgressResponse,
         "POST",
@@ -572,11 +575,14 @@ export class SyncEngine {
           pendingOperations: pending.length,
           state,
         },
-        AbortSignal.any(signals),
+        controller.signal,
       );
     } catch {
       // Telemetry is best effort; older Workers may not expose this endpoint.
       // Never advance a local cursor or fail a sync because reporting failed.
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", abort);
     }
   }
 

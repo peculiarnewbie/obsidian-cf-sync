@@ -103,8 +103,9 @@ files.
 
 ## Simulated-client end-to-end tests
 
-Run `pnpm test:e2e` for `packages/worker/src/__tests__/sync-e2e.test.ts`.
-The suite also runs as part of `pnpm test`.
+Run `pnpm test:e2e` for `packages/worker/src/__tests__/sync-e2e*.test.ts`.
+The suite also runs as part of `pnpm test`. Scenarios are grouped into separate
+Workers test runtimes to bound accumulated simulated-client state.
 
 Two real `SyncEngine` instances use independent in-memory Obsidian vaults,
 real file event callbacks, and separate scoped databases backed by

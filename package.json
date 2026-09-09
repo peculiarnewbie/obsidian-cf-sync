@@ -11,7 +11,7 @@
     "dev:plugin": "pnpm --filter plugin dev",
     "build:plugin": "pnpm --filter plugin build",
     "test": "pnpm --filter worker test && pnpm --filter plugin test",
-    "test:e2e": "pnpm --filter worker exec vitest run src/__tests__/sync-e2e.test.ts",
+    "test:e2e": "pnpm --filter worker exec vitest run sync-e2e",
     "fmt": "oxfmt --write .",
     "lint": "oxlint --config oxlint.json .",
     "check": "pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm check:dashboard",
