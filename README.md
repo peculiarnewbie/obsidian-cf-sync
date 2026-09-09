@@ -29,6 +29,8 @@ Implemented today:
 - IndexedDB local state for file metadata, pending operations, sync state, and chunk cache.
 - Device enrollment with per-device sync tokens.
 - Device revocation through the bootstrap API key.
+- Worker dashboard for devices, reported progress, vault summaries, revocation, and pairing-key copying.
+- Initial reconciliation of matching and disjoint files, with review and retry for differing paths.
 - Exact file-version compare-and-swap for every mutation.
 - Immutable attempted operations, ordered successors, and server-side rejection of operation-ID reuse with a changed payload.
 - Resumable remote imports, tombstone-aware fresh clients, and verified chunk downloads.
@@ -45,8 +47,6 @@ Not implemented or incomplete:
 - End-to-end encryption.
 - Production-grade device approval UX and key rotation.
 - Conflict UX beyond creating local conflict copies and notices.
-- A user-directed reconciliation flow when a fresh local vault and remote
-  vault both already contain files. Sync safely pauses and reports a summary.
 - Garbage collection for unreferenced R2 chunks.
 - Presigned download/upload URLs. The Worker currently proxies chunk upload and download.
 
@@ -164,3 +164,18 @@ Then configure your Worker URL and vault ID, and pair using your bootstrap key.
 The initial `0.1.0` release is a prerelease for testing on backed-up vaults.
 It is not listed in Obsidian's community directory. The GitHub-generated
 source archives are source code, not the installable plugin.
+
+## Worker dashboard
+
+Open your Worker URL in a browser and enter your vault ID and bootstrap pairing
+key. The dashboard lists device access, last server activity, device-reported
+progress, file counts, storage summaries, and recorded unresolved conflicts.
+Use **Copy pairing key** to pair another device or **Revoke** to disconnect one.
+The key stays in page memory; **Lock dashboard** clears it. Closing the page
+also clears it. Older plugins show no progress report until updated.
+
+On first sync, identical files are adopted without re-uploading, local-only
+files are uploaded, and remote-only files are downloaded. If shared paths have
+different contents, sync settings list them. Rename the local files to keep
+both versions (or make them match), then use **Retry initial sync**. Initial
+absence is never treated as a deletion.

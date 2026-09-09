@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import worker from "../worker";
 import {
+  DashboardResponse,
   ChangesResponse,
   ChunkUploadResponse,
   CommitResponse,
@@ -440,10 +441,12 @@ describe("Worker sync HTTP routes", () => {
     expect(Object.keys(SyncApi.groups.sync.endpoints).sort()).toEqual([
       "changes",
       "commit",
+      "dashboard",
       "enrollDevice",
       "file",
       "index",
       "prepare",
+      "reportProgress",
       "revokeDevice",
       "uploadChunk",
     ]);
@@ -1112,5 +1115,158 @@ describe("sync hardening", () => {
     );
     expect(await closed).toBe(1008);
     socket.close();
+  });
+});
+
+describe("dashboard and progress reporting", () => {
+  it("serves a public login shell without data or credentials and protects admin data", async () => {
+    const page = await worker.fetch(new Request("https://sync.test/"), workerEnv());
+    expect(page.status).toBe(200);
+    expect(page.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    expect(page.headers.get("Cache-Control")).toBe("no-store");
+    const html = await page.text();
+    expect(html).toContain("Copy pairing key");
+    expect(html).not.toContain(API_KEY);
+    const vault = "dashboard-access";
+    const token = await enrollDevice(vault);
+    for (const credential of ["wrong", token]) {
+      const response = await worker.fetch(
+        request("/admin/dashboard", {}, vault, credential),
+        workerEnv(),
+      );
+      expect(response.status).toBe(401);
+    }
+    const response = await worker.fetch(
+      bootstrapRequest("/admin/dashboard", {}, vault),
+      workerEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    const raw = await response.text();
+    expect(raw).not.toContain(token);
+    expect(raw).not.toContain("token_hash");
+    const data = decodeUnknownSync(DashboardResponse)(JSON.parse(raw));
+    expect(data.deviceCount).toBe(1);
+    expect(data.devices[0]).toMatchObject({
+      reportedAt: null,
+      reportedVersion: null,
+      pendingOperations: null,
+    });
+    const other = await worker.fetch(
+      bootstrapRequest("/admin/dashboard", {}, "dashboard-other"),
+      workerEnv(),
+    );
+    expect(await other.json()).toMatchObject({ deviceCount: 0 });
+  });
+
+  it("reports applied progress separately from requests and returns scoped storage and conflict counts", async () => {
+    const vault = "dashboard-progress";
+    const device = "progress-device";
+    const token = await enrollDevice(vault, device);
+    const stub = env.VaultDO.getByName(vault);
+    await stub.registerChunk({ hash: "a".repeat(64), size: 20 });
+    const op = decodeUnknownSync(CommitRequest)({
+      opId: "dashboard-put",
+      action: "put",
+      file: "note.md",
+      chunks: ["a".repeat(64)],
+      size: 20,
+      mtime: 1,
+      baseFileVersion: 0,
+      deviceId: device,
+    });
+    await stub.commit(op);
+    await stub.commit({
+      ...op,
+      opId: decodeUnknownSync(CommitRequest)({ ...op, opId: "dashboard-conflict" }).opId,
+    });
+    const read = await worker.fetch(
+      request("/sync/changes?since=0", {}, vault, token, device),
+      workerEnv(),
+    );
+    expect(read.status).toBe(200);
+    expect((await stub.dashboard()).devices[0]!.reportedVersion).toBeNull();
+    const report = await worker.fetch(
+      request(
+        "/sync/status",
+        {
+          method: "POST",
+          body: JSON.stringify({ globalVersion: 1, pendingOperations: 2, state: "active" }),
+        },
+        vault,
+        token,
+        device,
+      ),
+      workerEnv(),
+    );
+    expect(report.status).toBe(200);
+    const data = decodeUnknownSync(DashboardResponse)(await stub.dashboard());
+    expect(data).toMatchObject({
+      fileCount: 1,
+      fileBytes: 20,
+      registeredChunkBytes: 20,
+      unresolvedConflictCount: 1,
+    });
+    expect(data.devices[0]).toMatchObject({
+      reportedVersion: 1,
+      pendingOperations: 2,
+      state: "active",
+      revoked: false,
+    });
+    expect(data.devices[0]!.reportedAt).toBeTypeOf("number");
+    expect(data.conflicts[0]!.path).toBe("note.md");
+    const future = await worker.fetch(
+      request(
+        "/sync/status",
+        {
+          method: "POST",
+          body: JSON.stringify({ globalVersion: 2, pendingOperations: 0, state: "active" }),
+        },
+        vault,
+        token,
+        device,
+      ),
+      workerEnv(),
+    );
+    expect(future.status).toBe(400);
+    expect((await stub.dashboard()).devices[0]!.reportedVersion).toBe(1);
+    const invalid = await worker.fetch(
+      request(
+        "/sync/status",
+        {
+          method: "POST",
+          body: JSON.stringify({ globalVersion: 1, pendingOperations: -1, state: "active" }),
+        },
+        vault,
+        token,
+        device,
+      ),
+      workerEnv(),
+    );
+    expect(invalid.status).toBe(400);
+    const revoke = await worker.fetch(
+      bootstrapRequest(
+        "/devices/revoke",
+        { method: "POST", body: JSON.stringify({ deviceId: device }) },
+        vault,
+      ),
+      workerEnv(),
+    );
+    expect(revoke.status).toBe(200);
+    expect((await stub.dashboard()).devices[0]!.revoked).toBe(true);
+    const rejected = await worker.fetch(
+      request(
+        "/sync/status",
+        {
+          method: "POST",
+          body: JSON.stringify({ globalVersion: 1, pendingOperations: 0, state: "active" }),
+        },
+        vault,
+        token,
+        device,
+      ),
+      workerEnv(),
+    );
+    expect(rejected.status).toBe(401);
   });
 });

@@ -9,6 +9,7 @@
     ".wrangler/**",
     "pnpm-lock.yaml",
     "skills-lock.json",
-    ".github/workflows/pullfrog.yml"
+    ".github/workflows/pullfrog.yml",
+    "packages/worker/src/dashboard-script.generated.ts"
   ]
 }

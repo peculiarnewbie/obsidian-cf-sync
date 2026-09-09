@@ -114,10 +114,12 @@ installs file listeners or writes to the vault.
   files written before their metadata acknowledgement can be adopted on resume.
 - Local files + empty remote: snapshots the local files into the durable
   journal before recording the cursor.
-- Local files + remote files: hashes shared local paths, logs a count of
-  matching, local-only, remote-only, and conflicting paths, then pauses. It
-  does not overwrite or upload either side until a user-directed reconciliation
-  flow exists.
+- Local files + remote files: preflights shared paths before writes. Matching
+  files are adopted, remote-only files are downloaded, and local-only files are
+  journaled for upload. Differing shared paths pause with details in settings.
+  Users can rename local files to preserve both versions, then retry. No initial
+  absence is interpreted as deletion. The saved snapshot also supports recovery
+  from an interrupted mixed-vault import.
 
 During normal receives, an existing local file without a corresponding local
 metadata record is treated the same way: the remote operation stops rather
@@ -177,3 +179,17 @@ local edits. Configuration paths are excluded in both directions.
 Periodic reconciliation compares file size and modification time before
 reading unchanged bodies, with a full hash audit every five minutes while
 active. This reduces idle work while retaining a fallback for missed events.
+
+## Dashboard
+
+The Worker serves an HTML login shell and an authenticated vault dashboard.
+Bootstrap-key authorization protects administration; device tokens are limited
+to synchronization and their own progress reports. The pairing-key copy button
+uses the key already held in page memory and does not fetch Worker secrets.
+
+Progress reports carry the client's applied cursor, queued-operation count, and
+state. They are best effort, bounded by a five-second timeout, and stored
+separately from server-observed activity. The UI distinguishes these snapshots
+from transport connectivity and exposes unknown progress for older clients.
+Storage and conflict summaries describe vault registrations/server records,
+not account billing or a complete list of local conflict copies.

@@ -313,3 +313,44 @@ Broadcast message after successful commits:
 Ping/pong uses the Durable Object auto-response API to avoid waking a
 hibernating object. Only `file_changed` notifications wake the plugin's sync
 coordinator; pong messages do not initiate replication.
+
+## Dashboard and device progress
+
+`GET /` and `GET /dashboard` serve a login shell containing no vault data.
+`GET /admin/dashboard` requires the bootstrap key in `Authorization: Bearer …`
+and a valid `X-Vault-Id`. Device tokens cannot access this endpoint. Responses
+are marked `Cache-Control: no-store` and never include credentials or token hashes.
+
+The response contains `globalVersion`, active `fileCount`, logical `fileBytes`,
+`registeredChunkBytes`, `deviceCount`, `unresolvedConflictCount`, the latest 200
+`devices` by server activity, and the latest 50 unresolved server `conflicts`.
+Registered chunk bytes include retained/orphaned uploads for this vault and are
+not physical account-wide R2 usage. Conflict records are not a complete inventory
+of client-side conflict copies and are not automatically marked resolved when
+users edit or delete those copies.
+
+Each device includes identity, enrollment time, `lastSeen`, revocation and
+WebSocket connection state, plus nullable `reportedAt`, `reportedVersion`,
+`pendingOperations`, and `state`. `lastSeen` is server-observed authenticated
+activity. A WebSocket connection does not imply synchronization. Report fields
+remain null for clients that have not sent a report.
+
+`POST /sync/status` accepts device authentication and this payload:
+
+```json
+{ "globalVersion": 12, "pendingOperations": 0, "state": "active" }
+```
+
+`globalVersion` is the last change applied locally, not merely downloaded.
+Counts must be nonnegative safe integers; a cursor beyond the server version is
+rejected. `state` is `active`, `initializing`, `needs-review`, or `error`.
+The authenticated device identity is used; a caller cannot report another
+device's progress. Reports are snapshots, not a guarantee that the device is
+currently online or caught up. Reporting failures never advance the local
+cursor or prevent content synchronization.
+
+The dashboard's **Revoke** action uses the existing `POST /devices/revoke` route.
+**Copy pairing key** copies the key entered at login from page memory; there is
+no endpoint that reveals the Worker secret. The key is not stored in cookies,
+local storage, session storage, or URLs. Deploy the Worker before upgrading
+plugins to see progress; older Workers safely ignore failed progress requests.

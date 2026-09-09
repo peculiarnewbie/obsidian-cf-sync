@@ -30,7 +30,7 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       name: "Show sync status",
       callback: () => {
         new Notice(
-          `Sync: ${this.syncEngine?.active ? "active" : "inactive"}\nDevice: ${this.settings.deviceId}`,
+          `Sync: ${this.syncEngine?.status ?? "Not started"}\nDevice: ${this.settings.deviceId}`,
         );
       },
     });
@@ -91,7 +91,11 @@ export default class ObsidianCfSyncPlugin extends Plugin {
       settings.enabled,
       settings.syncInterval,
     ]);
-    if (key === this.engineSettingsKey && this.syncEngine?.active) return;
+    if (
+      key === this.engineSettingsKey &&
+      (this.syncEngine?.active || this.syncEngine?.needsReconciliation)
+    )
+      return;
     await this.syncEngine?.shutdown();
     this.syncEngine = null;
     this.engineSettingsKey = key;
@@ -147,7 +151,17 @@ export default class ObsidianCfSyncPlugin extends Plugin {
     this.settings.deviceId = enrollment.deviceId;
     this.settings.deviceToken = enrollment.deviceToken;
     await this.saveSettings();
-    new Notice("Device paired");
+    new Notice(
+      this.syncEngine?.needsReconciliation
+        ? "Device paired; initial sync needs review in settings"
+        : "Device paired",
+    );
+  }
+
+  async retryInitialSync(): Promise<void> {
+    if (!this.settings.enabled || !this.syncEngine) return;
+    await this.syncEngine.start();
+    await this.syncEngine.syncNow();
   }
 
   private async startSync(): Promise<void> {

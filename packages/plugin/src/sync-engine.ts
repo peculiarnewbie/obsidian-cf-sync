@@ -3,6 +3,8 @@ import type { PluginSettings } from "./settings";
 import { LocalState, type PendingOp } from "./local-state";
 import { ConnectionManager } from "./connection";
 import {
+  DeviceProgressResponse,
+  type DeviceProgressRequest,
   ChangesResponse as ChangesResponseSchema,
   CommitResponse as CommitResponseSchema,
   FullIndexResponse as FullIndexResponseSchema,
@@ -19,17 +21,7 @@ const POLL_INTERVAL_MS = 60_000;
 
 type EngineLifecycle = "stopped" | "starting" | "started";
 
-type BootstrapResult =
-  | { kind: "empty" }
-  | { kind: "local-only"; localFiles: number }
-  | { kind: "remote-only"; remoteFiles: number }
-  | {
-      kind: "both-populated";
-      localOnlyPaths: number;
-      remoteOnlyPaths: number;
-      matchingPaths: number;
-      conflictingPaths: number;
-    };
+type BootstrapResult = { kind: "ready" } | { kind: "needs-review"; paths: string[] };
 
 export class SyncEngine {
   private app: App;
@@ -51,6 +43,18 @@ export class SyncEngine {
   private applyingRemote = false;
   private scannedFiles = new Map<string, { mtime: number; size: number }>();
   private lastAuditAt = 0;
+  private reviewPaths: string[] = [];
+  private statusMessage = "Sync is stopped";
+
+  get reconciliationPaths(): readonly string[] {
+    return this.reviewPaths;
+  }
+  get needsReconciliation(): boolean {
+    return this.reviewPaths.length > 0;
+  }
+  get status(): string {
+    return this.statusMessage;
+  }
 
   constructor(app: App, settings: PluginSettings) {
     this.app = app;
@@ -84,6 +88,8 @@ export class SyncEngine {
 
     const generation = ++this.startGeneration;
     this.lifecycle = "starting";
+    this.reviewPaths = [];
+    this.statusMessage = "Preparing initial sync";
     this.abortController = new AbortController();
     const startPromise = this.startInternal(this.abortController, generation);
     this.startPromise = startPromise;
@@ -142,18 +148,23 @@ export class SyncEngine {
     if (!this.isCurrentStart(abortController, generation)) return;
 
     if (!(await this.localState.hasSyncState())) {
+      await this.reportProgress("initializing");
+      if (!this.isCurrentStart(abortController, generation)) return;
       let bootstrap: BootstrapResult;
       try {
         bootstrap = await this.bootstrapFreshScope();
       } catch (error) {
         if (!this.isCurrentStart(abortController, generation)) return;
+        await this.reportProgress("error");
         this.stopAfterFailedBootstrap("Unable to inspect the initial sync state", error);
         return;
       }
-      if (bootstrap.kind === "both-populated") {
+      if (bootstrap.kind === "needs-review") {
+        this.reviewPaths = bootstrap.paths;
+        await this.reportProgress("needs-review");
         this.stopAfterFailedBootstrap(
-          `Initial sync paused: ${bootstrap.localOnlyPaths} local-only, ${bootstrap.remoteOnlyPaths} remote-only, and ${bootstrap.conflictingPaths} conflicting paths. Reconciliation UI is not implemented yet.`,
-          bootstrap,
+          `Paired; initial sync needs review of ${bootstrap.paths.length} differing file(s). Open sync settings for details.`,
+          bootstrap.paths,
         );
         return;
       }
@@ -170,108 +181,81 @@ export class SyncEngine {
       this.connectionHandlersInstalled = true;
     }
     this.lifecycle = "started";
+    this.statusMessage = "Sync is active";
     this.installVaultEventsWhenReady();
     this.connection.connect();
     this.startPolling();
   }
 
   private async bootstrapFreshScope(): Promise<BootstrapResult> {
-    const localFiles = this.app.vault.getFiles().filter((file) => this.isSyncablePath(file.path));
     const savedBootstrap = await this.localState.getBootstrap();
     const remoteIndex =
       savedBootstrap ?? (await this.apiCall(FullIndexResponseSchema, "GET", "/sync/index"));
+    const remoteFiles = remoteIndex.files.filter((entry) => this.isSyncablePath(entry.path));
+    const matching = new Set<string>();
+    const differing: string[] = [];
 
-    for (const entry of remoteIndex.tombstones ?? []) {
-      if (this.isSyncablePath(entry.path)) {
-        await this.localState.putFile({ ...entry, chunks: [], deleted: true });
+    // Inspect every shared path before any vault write or cursor acknowledgement.
+    // Absence on either side of an initial snapshot never implies deletion.
+    for (const entry of remoteFiles) {
+      const ancestors = entry.path.split("/").slice(0, -1);
+      let parent = "";
+      for (const part of ancestors) {
+        parent = parent ? `${parent}/${part}` : part;
+        if (this.app.vault.getAbstractFileByPath(parent) instanceof TFile) differing.push(parent);
       }
-    }
-
-    if (localFiles.length === 0 && remoteIndex.files.length === 0) {
-      await this.localState.updateSyncState({
-        globalVersion: remoteIndex.globalVersion,
-        lastFullSync: Date.now(),
-      });
-      return { kind: "empty" };
-    }
-
-    if (savedBootstrap || localFiles.length === 0) {
-      if (!savedBootstrap) await this.localState.putBootstrap(remoteIndex);
-      for (const fileEntry of [...remoteIndex.files].sort((a, b) => a.path.localeCompare(b.path))) {
-        if (!this.isSyncablePath(fileEntry.path)) continue;
-        const existing = this.app.vault.getAbstractFileByPath(fileEntry.path);
-        if (
-          savedBootstrap &&
-          existing instanceof TFile &&
-          !(await this.localState.getFile(fileEntry.path))
-        ) {
-          // Recover a crash between the filesystem write and its IndexedDB acknowledgement.
-          const hashes = (await this.chunkData(await this.app.vault.readBinary(existing))).map(
-            (chunk) => chunk.hash,
-          );
-          if (!this.arraysEqual(hashes, Array.from(fileEntry.chunks))) {
-            throw new Error(
-              `Untracked local content differs from the saved import: ${fileEntry.path}`,
-            );
-          }
-          await this.localState.putFile({ ...fileEntry, chunks: hashes, deleted: false });
-        }
-        await this.applyFileEntry(fileEntry);
-      }
-      await this.localState.updateSyncState({
-        globalVersion: remoteIndex.globalVersion,
-        lastFullSync: Date.now(),
-      });
-      await this.localState.clearBootstrap();
-      return { kind: "remote-only", remoteFiles: remoteIndex.files.length };
-    }
-
-    if (remoteIndex.files.length === 0) {
-      await this.queueJournal(async () => {
-        for (const file of localFiles) {
-          await this.queuePut(file);
-        }
-      });
-      await this.localState.updateSyncState({
-        globalVersion: remoteIndex.globalVersion,
-        lastFullSync: Date.now(),
-      });
-      return { kind: "local-only", localFiles: localFiles.length };
-    }
-
-    const remoteByPath = new Map<string, (typeof remoteIndex.files)[number]>(
-      remoteIndex.files.map((file) => [file.path, file]),
-    );
-    let localOnlyPaths = 0;
-    let matchingPaths = 0;
-    let conflictingPaths = 0;
-    for (const localFile of localFiles) {
-      const remoteFile = remoteByPath.get(localFile.path);
-      if (!remoteFile) {
-        localOnlyPaths += 1;
+      const local = this.app.vault.getAbstractFileByPath(entry.path);
+      if (!local) continue;
+      if (!(local instanceof TFile)) {
+        differing.push(entry.path);
         continue;
       }
-      const localChunks = (await this.chunkData(await this.app.vault.readBinary(localFile))).map(
+      const hashes = (await this.chunkData(await this.app.vault.readBinary(local))).map(
         (chunk) => chunk.hash,
       );
-      if (this.arraysEqual(localChunks, Array.from(remoteFile.chunks))) {
-        matchingPaths += 1;
+      if (this.arraysEqual(hashes, Array.from(entry.chunks))) matching.add(entry.path);
+      else differing.push(entry.path);
+    }
+    if (differing.length > 0)
+      return { kind: "needs-review", paths: [...new Set(differing)].sort() };
+
+    // Retain the same high-water mark across interrupted imports, including
+    // crashes between writing a file and recording its metadata.
+    if (!savedBootstrap) await this.localState.putBootstrap(remoteIndex);
+    for (const entry of remoteIndex.tombstones ?? []) {
+      if (this.isSyncablePath(entry.path))
+        await this.localState.putFile({ ...entry, chunks: [], deleted: true });
+    }
+    for (const entry of remoteFiles) {
+      this.abortController?.signal.throwIfAborted();
+      if (matching.has(entry.path)) {
+        await this.localState.putFile({
+          ...entry,
+          chunks: Array.from(entry.chunks),
+          deleted: false,
+        });
       } else {
-        conflictingPaths += 1;
+        await this.applyFileEntry(entry);
       }
     }
-
-    return {
-      kind: "both-populated",
-      localOnlyPaths,
-      remoteOnlyPaths: remoteIndex.files.length - matchingPaths - conflictingPaths,
-      matchingPaths,
-      conflictingPaths,
-    };
+    await this.queueJournal(async () => {
+      // Re-read the current vault so edits during import are journaled too.
+      for (const file of this.app.vault.getFiles()) {
+        if (this.isSyncablePath(file.path)) await this.queuePut(file);
+      }
+    });
+    this.abortController?.signal.throwIfAborted();
+    await this.localState.updateSyncState({
+      globalVersion: remoteIndex.globalVersion,
+      lastFullSync: Date.now(),
+    });
+    await this.localState.clearBootstrap();
+    return { kind: "ready" };
   }
 
   private stopAfterFailedBootstrap(message: string, details: unknown): void {
     this.lifecycle = "stopped";
+    this.statusMessage = message;
     this.abortController?.abort();
     this.connection.disconnect();
     this.logError(message, details);
@@ -567,7 +551,32 @@ export class SyncEngine {
       }
       if (this.lifecycle === "started") {
         await this.catchUp();
+        await this.reportProgress("active");
       }
+    }
+  }
+
+  private async reportProgress(state: DeviceProgressRequest["state"]): Promise<void> {
+    if (this.abortController?.signal.aborted) return;
+    try {
+      const cursor = await this.localState.getSyncState();
+      const pending = await this.localState.getPendingOps();
+      const signals = [AbortSignal.timeout(5_000)];
+      if (this.abortController) signals.push(this.abortController.signal);
+      await this.apiCall(
+        DeviceProgressResponse,
+        "POST",
+        "/sync/status",
+        {
+          globalVersion: cursor.globalVersion,
+          pendingOperations: pending.length,
+          state,
+        },
+        AbortSignal.any(signals),
+      );
+    } catch {
+      // Telemetry is best effort; older Workers may not expose this endpoint.
+      // Never advance a local cursor or fail a sync because reporting failed.
     }
   }
 
@@ -1137,11 +1146,12 @@ export class SyncEngine {
     method: string,
     path: string,
     body?: unknown,
+    signal = this.abortController?.signal,
   ): Promise<A> {
     const url = `${this.settings.workerUrl}${path}`;
     const opts: RequestInit = {
       method,
-      signal: this.abortController?.signal,
+      signal,
       headers: {
         Authorization: `Bearer ${this.settings.deviceToken}`,
         "X-Vault-Id": this.settings.vaultId,
